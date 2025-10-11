@@ -24,7 +24,7 @@ func (handler *UserHandler) GetUserByToken(ctx *fiber.Ctx) error {
 		})
 	}
 
-	userResponse, err := handler.GetUserByID(ctx.Context(), token)
+	userResponse, err := handler.UserUsecase.GetUserByID(ctx.Context(), token)
 	if err != nil {
 		handler.Logger.WithError(err).Errorln("Failed to get user by token")
 		return err
@@ -36,4 +36,19 @@ func (handler *UserHandler) GetUserByToken(ctx *fiber.Ctx) error {
 		Data:       userResponse,
 	}
 	return ctx.Status(fiber.StatusOK).JSON(response)
+}
+
+func (handler *UserHandler) GetAllUsers(ctx *fiber.Ctx) error {
+	userResponses, err := handler.UserUsecase.GetAllUser(ctx.Context())
+	if err != nil {
+		handler.Logger.WithError(err).Errorln("Failed to get user by token")
+		return err
+	}
+
+	responses := res.CommonResponse[[]res.UserResponse]{
+		Message:    "Successfully To Get All User",
+		StatusCode: fiber.StatusOK,
+		Data:       userResponses,
+	}
+	return ctx.Status(fiber.StatusOK).JSON(responses)
 }

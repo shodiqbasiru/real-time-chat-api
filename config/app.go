@@ -56,18 +56,25 @@ func RunServer() {
 func App(aC *AppConfig) {
 	newAuthRepository := repository.NewAuthRepository()
 	newUserRepository := repository.NewUserRepository()
+	newChatRepository := repository.NewChatRepository()
 
 	newAuthUsecase := usecase.NewAuthUsecase(newAuthRepository, aC.Validate, aC.GetDB(), aC.Logger, aC.JWT)
 	newAuthCase := usecase.NewUserUsecase(newUserRepository, aC.Validate, aC.GetDB(), aC.Logger, aC.JWT)
+	newChatUsecase := usecase.NewChatUsecase(newChatRepository, aC.Logger, aC.GetDB(), aC.JWT)
 
 	newAuthHandler := handler.NewAuthHandler(newAuthUsecase, aC.Logger)
 	newUserHandler := handler.NewUserHandler(newAuthCase, aC.Logger)
+	newChatHandler := handler.NewChatHandler(newChatUsecase, aC.Logger)
+
+	wsHandler := handler.NewWebSocketHandler(aC.GetDB(), aC.Logger, newChatUsecase)
 
 	route := routes.ConfigRoute{
 		App:         aC.App,
 		Middleware:  aC.Middleware,
 		AuthHandler: newAuthHandler,
 		UserHandler: newUserHandler,
+		ChatHandler: newChatHandler,
 	}
 	route.GetRoute()
+	route.GetWebSocketRoute(wsHandler)
 }

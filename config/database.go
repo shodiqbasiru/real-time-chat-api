@@ -49,7 +49,11 @@ func initDatabase(cfg *common.Config, log *logrus.Logger) *gorm.DB {
 
 	var auth entity.Account
 	var user entity.User
-	if err := db.AutoMigrate(&auth, &user); err != nil {
+	var chat entity.Chat
+	var chatParticipant entity.ChatParticipant
+	var messages entity.Messages
+	var userChat entity.UserChat
+	if err := db.AutoMigrate(&auth, &user, &chat, &chatParticipant, &messages, &userChat); err != nil {
 		panic("failed run migration")
 	}
 

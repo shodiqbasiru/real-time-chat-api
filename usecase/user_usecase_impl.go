@@ -49,3 +49,27 @@ func (uc *UserUsecaseImpl) GetUserByID(ctx context.Context, token string) (res.U
 		CreatedAt:   user.CreatedAt.Format("2006-01-02 15:04:05"),
 	}, nil
 }
+
+func (uc *UserUsecaseImpl) GetAllUser(ctx context.Context) ([]res.UserResponse, error) {
+	// find user by id
+	var users []entity.User
+	if err := uc.UserRepository.FindAll(ctx, uc.DB, &users); err != nil {
+		uc.Logger.WithError(err).Errorf("Failed to get all = %v", err)
+		return nil, err
+	}
+
+	var userResponses []res.UserResponse
+
+	for _, user := range users {
+		userResponses = append(userResponses, res.UserResponse{
+			ID:          user.ID,
+			Name:        user.Name,
+			Email:       user.Email,
+			PhoneNumber: user.PhoneNumber,
+			CreatedAt:   user.CreatedAt.Format("2006-01-02 15:04:05"),
+		})
+	}
+
+	// mapping user response
+	return userResponses, nil
+}

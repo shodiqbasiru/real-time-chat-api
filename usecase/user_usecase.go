@@ -7,4 +7,5 @@ import (
 
 type UserUsecase interface {
 	GetUserByID(ctx context.Context, token string) (res.UserResponse, error)
+	GetAllUser(ctx context.Context) ([]res.UserResponse, error)
 }
