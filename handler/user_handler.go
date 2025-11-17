@@ -52,3 +52,7 @@ func (handler *UserHandler) GetAllUsers(ctx *fiber.Ctx) error {
 	}
 	return ctx.Status(fiber.StatusOK).JSON(responses)
 }
+
+func (handler *UserHandler) EditUser(ctx *fiber.Ctx) error {
+	panic("")
+}

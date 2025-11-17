@@ -72,18 +72,23 @@ func (uc *ChatUsecaseImpl) FindChatByID(ctx context.Context, db *gorm.DB, chatID
 }
 
 func (uc *ChatUsecaseImpl) GetChatsByUser(ctx context.Context, token string) ([]res.ChatResponse, error) {
-	// 1. Extract user ID dari token
 	userId, err := uc.JWT.GetUserIdFromToken(token)
 	if err != nil {
 		uc.Logger.WithError(err).Error("Failed to extract user ID from token")
 		return nil, err
 	}
 
-	// 2. Ambil semua chat milik user ini
 	chats, err := uc.ChatRepository.FindAllByUserID(ctx, uc.DB, userId)
 	if err != nil {
 		uc.Logger.WithError(err).Error("Failed to get chats by user ID")
 		return nil, err
+	}
+
+	// ambil semua unread count sekaligus
+	unreadMap, err := uc.getUnreadCount(ctx, userId)
+	if err != nil {
+		uc.Logger.WithError(err).Warn("Failed to get unread counts")
+		unreadMap = make(map[string]int)
 	}
 
 	var chatResponses []res.ChatResponse
@@ -91,7 +96,6 @@ func (uc *ChatUsecaseImpl) GetChatsByUser(ctx context.Context, token string) ([]
 	for _, chat := range chats {
 		var chatUsername string
 
-		// 3. Tentukan nama chat berdasarkan tipe
 		if chat.ChatType == enum.PRIVATE {
 			// Cari participant lain selain user ini
 			for _, participant := range chat.Participants {
@@ -107,18 +111,19 @@ func (uc *ChatUsecaseImpl) GetChatsByUser(ctx context.Context, token string) ([]
 			chatUsername = chat.GroupName
 		}
 
-		// 4. Ambil pesan terakhir (opsional)
 		var lastMessage entity.Messages
 		if err := uc.DB.Where("chat_id = ?", chat.ID).
 			Order("created_at DESC").
 			First(&lastMessage).Error; err != nil {
-			// kalau tidak ada pesan, abaikan error
 		}
 
-		// 5. Bangun response
+		unread := unreadMap[chat.ID]
+
 		chatResponses = append(chatResponses, res.ChatResponse{
 			ChatId:          chat.ID,
 			ChatUsername:    chatUsername,
+			LastMessage:     lastMessage.Content,
+			UnreadCount:     uint(unread),
 			LastMessageTime: lastMessage.CreatedAt.Format("2006-01-02 15:04:05"),
 		})
 	}
@@ -127,13 +132,11 @@ func (uc *ChatUsecaseImpl) GetChatsByUser(ctx context.Context, token string) ([]
 }
 
 func (uc *ChatUsecaseImpl) GetMessagesByChatID(ctx context.Context, token string, chatId string) ([]res.MessageResponse, error) {
-	// Ambil userId dari token untuk validasi
 	userId, err := uc.JWT.GetUserIdFromToken(token)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse token: %w", err)
 	}
 
-	// Pastikan user termasuk dalam chat ini (security check)
 	isParticipant, err := uc.ChatRepository.IsUserInChat(ctx, uc.DB, chatId, userId)
 	if err != nil {
 		return nil, fmt.Errorf("failed to verify participant: %w", err)
@@ -142,13 +145,11 @@ func (uc *ChatUsecaseImpl) GetMessagesByChatID(ctx context.Context, token string
 		return nil, fmt.Errorf("user not authorized for this chat")
 	}
 
-	// Ambil semua messages berdasarkan chatId
 	messages, err := uc.ChatRepository.FindMessagesByChatID(ctx, uc.DB, chatId)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get messages: %w", err)
 	}
 
-	// Map ke response DTO
 	var responses []res.MessageResponse
 	for _, msg := range messages {
 		responses = append(responses, res.MessageResponse{
@@ -156,9 +157,35 @@ func (uc *ChatUsecaseImpl) GetMessagesByChatID(ctx context.Context, token string
 			Content:    msg.Content,
 			SenderId:   msg.SenderId,
 			SenderName: msg.Sender.Name,
+			Status:     string(msg.Status),
 			CreatedAt:  msg.CreatedAt.Format("2006-01-02 15:04:05"),
 		})
 	}
 
 	return responses, nil
+}
+
+func (uc *ChatUsecaseImpl) getUnreadCount(ctx context.Context, userID string) (map[string]int, error) {
+	type result struct {
+		ChatID string
+		Count  int
+	}
+	var rows []result
+
+	err := uc.DB.Table("t_message_status AS ms").
+		Select("m.chat_id, COUNT(ms.id) as count").
+		Joins("JOIN t_messages m ON m.id = ms.message_id").
+		Where("ms.user_id = ? AND ms.is_read = false", userID).
+		Group("m.chat_id").
+		Scan(&rows).Error
+
+	if err != nil {
+		return nil, err
+	}
+
+	unreadMap := make(map[string]int)
+	for _, r := range rows {
+		unreadMap[r.ChatID] = r.Count
+	}
+	return unreadMap, nil
 }

@@ -32,10 +32,13 @@ func (rc *ConfigRoute) GetProtectedRoute() {
 
 	app.Get("/auth/me", rc.UserHandler.GetUserByToken)
 
+	// users endpoint
 	app.Get("/users", rc.UserHandler.GetAllUsers)
+	app.Put("/users/profile/:userId", rc.UserHandler.EditUser)
 
+	//chat endpoint
 	app.Get("/chats/:chatId/messages", rc.ChatHandler.GetMessagesByID)
-
+	app.Put("/chats/:chatId/read", rc.ChatHandler.MarkMessagesAsRead)
 	app.Get("/chats", rc.ChatHandler.GetAllChat)
 }
 

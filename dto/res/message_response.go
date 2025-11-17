@@ -6,4 +6,6 @@ type MessageResponse struct {
 	SenderId   string `json:"senderId"`
 	SenderName string `json:"senderName"`
 	CreatedAt  string `json:"createdAt"`
+	Status     string `json:"status"`
+	IsRead     bool   `json:"isRead"`
 }

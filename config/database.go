@@ -28,7 +28,7 @@ func (db *DBConfig) GetDB() *gorm.DB {
 func initDatabase(cfg *common.Config, log *logrus.Logger) *gorm.DB {
 	dbHost, dbUser, dbPassword, dbName, dbPort := cfg.GetDatabaseConfig()
 	dsn := fmt.Sprintf(
-		"host=%s user=%s password=%s dbname=%s port=%s sslmode=disable",
+		"host=%s user=%s password=%s dbname=%s port=%s sslmode=disable TimeZone=Asia/Jakarta",
 		dbHost, dbUser, dbPassword, dbName, dbPort,
 	)
 	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{
@@ -52,14 +52,13 @@ func initDatabase(cfg *common.Config, log *logrus.Logger) *gorm.DB {
 	var chat entity.Chat
 	var chatParticipant entity.ChatParticipant
 	var messages entity.Messages
-	var userChat entity.UserChat
-	if err := db.AutoMigrate(&auth, &user, &chat, &chatParticipant, &messages, &userChat); err != nil {
+	var messageStatus entity.MessageStatus
+	if err := db.AutoMigrate(&auth, &user, &chat, &chatParticipant, &messages, &messageStatus); err != nil {
 		panic("failed run migration")
 	}
 
 	conn.SetMaxIdleConns(10)
 	conn.SetMaxOpenConns(100)
 	conn.SetConnMaxLifetime(time.Second * time.Duration(300))
-
 	return db
 }

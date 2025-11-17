@@ -37,6 +37,7 @@ func RunServer() {
 		AllowOrigins: "http://localhost:8080",
 		AllowMethods: "GET,POST,PUT,DELETE,OPTIONS",
 		AllowHeaders: "Origin, Content-Type, Accept, Authorization",
+		//AllowCredentials: true, // FIX: Enable credentials untuk WebSocket
 	}))
 
 	App(&AppConfig{
@@ -61,12 +62,13 @@ func App(aC *AppConfig) {
 	newAuthUsecase := usecase.NewAuthUsecase(newAuthRepository, aC.Validate, aC.GetDB(), aC.Logger, aC.JWT)
 	newAuthCase := usecase.NewUserUsecase(newUserRepository, aC.Validate, aC.GetDB(), aC.Logger, aC.JWT)
 	newChatUsecase := usecase.NewChatUsecase(newChatRepository, aC.Logger, aC.GetDB(), aC.JWT)
+	newMessageUsecase := usecase.NewMessageUsecase(aC.DB, newChatUsecase)
 
 	newAuthHandler := handler.NewAuthHandler(newAuthUsecase, aC.Logger)
 	newUserHandler := handler.NewUserHandler(newAuthCase, aC.Logger)
-	newChatHandler := handler.NewChatHandler(newChatUsecase, aC.Logger)
+	newChatHandler := handler.NewChatHandler(newChatUsecase, newMessageUsecase, aC.Logger, aC.JWT)
 
-	wsHandler := handler.NewWebSocketHandler(aC.GetDB(), aC.Logger, newChatUsecase)
+	wsHandler := handler.NewWebSocketHandler(aC.GetDB(), aC.Logger, newChatUsecase, newMessageUsecase)
 
 	route := routes.ConfigRoute{
 		App:         aC.App,

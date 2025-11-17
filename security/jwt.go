@@ -1,7 +1,6 @@
 package security
 
 import (
-	"github.com/gofiber/fiber/v2/log"
 	"github.com/golang-jwt/jwt/v5"
 	"real-time-chat-app/config/common"
 	"real-time-chat-app/entity"
@@ -59,8 +58,6 @@ func (j *JWT) GetUserIdFromToken(token string) (string, error) {
 	}
 
 	userID, ok := claims["user_id"].(string)
-
-	log.Infof("User ID From JWT: %s", userID)
 
 	if !ok {
 		return "", jwt.ErrInvalidKey

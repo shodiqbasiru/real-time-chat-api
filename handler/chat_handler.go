@@ -4,30 +4,21 @@ import (
 	"github.com/gofiber/fiber/v2"
 	"github.com/sirupsen/logrus"
 	"real-time-chat-app/dto/res"
+	"real-time-chat-app/security"
 	"real-time-chat-app/usecase"
 )
 
 type ChatHandler struct {
 	usecase.ChatUsecase
+	usecase.MessageUsecase
 	*logrus.Logger
+	*security.JWT
 }
 
-func NewChatHandler(chatUsecase usecase.ChatUsecase, logger *logrus.Logger) *ChatHandler {
-	return &ChatHandler{
-		ChatUsecase: chatUsecase,
-		Logger:      logger,
-	}
+func NewChatHandler(chatUsecase usecase.ChatUsecase, messageUsecase usecase.MessageUsecase, logger *logrus.Logger, JWT *security.JWT) *ChatHandler {
+	return &ChatHandler{ChatUsecase: chatUsecase, MessageUsecase: messageUsecase, Logger: logger, JWT: JWT}
 }
 
-// GetAllChat godoc
-// @Summary Get chat messages by chat ID
-// @Description Retrieve all messages from a chat room
-// @Tags Chat
-// @Produce json
-// @Param chatId path string true "Chat ID"
-// @Success 200 {array} entity.Messages
-// @Failure 500 {object} fiber.Map
-// @Router /api/v1/chat/{chatId}/messages [get]
 func (handler *ChatHandler) GetAllChat(c *fiber.Ctx) error {
 	// get token from header
 	token := c.Get("Authorization")[7:]
@@ -70,4 +61,30 @@ func (handler *ChatHandler) GetMessagesByID(c *fiber.Ctx) error {
 		"messages": messages,
 	})
 
+}
+
+func (handler *ChatHandler) MarkMessagesAsRead(c *fiber.Ctx) error {
+	ctx := c.Context()
+	chatId := c.Params("chatId")
+	token := c.Get("Authorization")[7:]
+
+	userID, err := handler.JWT.GetUserIdFromToken(token)
+	if err != nil {
+		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
+			"error": "invalid token",
+		})
+	}
+
+	err = handler.MessageUsecase.MarkMessagesAsRead(ctx, chatId, userID)
+	if err != nil {
+		handler.Logger.WithError(err).Error("Failed to mark messages as read")
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": err.Error(),
+		})
+	}
+
+	return c.JSON(fiber.Map{
+		"chatId": chatId,
+		"status": "messages marked as read",
+	})
 }
