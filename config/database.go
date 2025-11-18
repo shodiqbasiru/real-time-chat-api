@@ -2,30 +2,30 @@ package config
 
 import (
 	"fmt"
-	"github.com/sirupsen/logrus"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 	"gorm.io/gorm/schema"
 	"real-time-chat-app/config/common"
+	"real-time-chat-app/config/logger"
 	"real-time-chat-app/entity"
 	"time"
 )
 
 type DBConfig struct {
 	*gorm.DB
-	*logrus.Logger
+	*logger.AppLogger
 }
 
-func NewDB(config *common.Config, log *logrus.Logger) *DBConfig {
+func NewDB(config *common.Config, log *logger.AppLogger) *DBConfig {
 	db := initDatabase(config, log)
-	return &DBConfig{DB: db, Logger: log}
+	return &DBConfig{DB: db, AppLogger: log}
 }
 
 func (db *DBConfig) GetDB() *gorm.DB {
 	return db.DB
 }
 
-func initDatabase(cfg *common.Config, log *logrus.Logger) *gorm.DB {
+func initDatabase(cfg *common.Config, log *logger.AppLogger) *gorm.DB {
 	dbHost, dbUser, dbPassword, dbName, dbPort := cfg.GetDatabaseConfig()
 	dsn := fmt.Sprintf(
 		"host=%s user=%s password=%s dbname=%s port=%s sslmode=disable TimeZone=Asia/Jakarta",
@@ -38,7 +38,7 @@ func initDatabase(cfg *common.Config, log *logrus.Logger) *gorm.DB {
 		},
 	})
 	if err != nil {
-		log.WithError(err).Errorf("falied to connect to database : %v", err)
+		log.Http.Error.Error().Err(err).Msg("failed to connect to database : %v")
 	}
 
 	fmt.Println("Connection Opened to Database")

@@ -2,9 +2,10 @@ package handler
 
 import (
 	"context"
+	"encoding/json"
 	"github.com/gofiber/contrib/websocket"
-	"github.com/sirupsen/logrus"
 	"gorm.io/gorm"
+	"real-time-chat-app/config/logger"
 	"real-time-chat-app/dto/req"
 	"real-time-chat-app/entity"
 	"real-time-chat-app/usecase"
@@ -21,7 +22,7 @@ type BroadcastMessage struct {
 
 type WebSocketHandler struct {
 	DB        *gorm.DB
-	Logger    *logrus.Logger
+	Log       *logger.AppLogger
 	ChatUC    usecase.ChatUsecase
 	MessageUC usecase.MessageUsecase
 	Clients   map[string]*websocket.Conn            // userId -> conn
@@ -29,10 +30,11 @@ type WebSocketHandler struct {
 	Mutex     sync.RWMutex
 }
 
-func NewWebSocketHandler(db *gorm.DB, logger *logrus.Logger, chatUC usecase.ChatUsecase, messageUC usecase.MessageUsecase) *WebSocketHandler {
+func NewWebSocketHandler(db *gorm.DB, logger *logger.AppLogger, chatUC usecase.ChatUsecase, messageUC usecase.MessageUsecase) *WebSocketHandler {
+	logger.WS.Info.Info().Msg("WebSocket handler initialized")
 	return &WebSocketHandler{
 		DB:        db,
-		Logger:    logger,
+		Log:       logger,
 		ChatUC:    chatUC,
 		MessageUC: messageUC,
 		Clients:   make(map[string]*websocket.Conn),
@@ -42,11 +44,18 @@ func NewWebSocketHandler(db *gorm.DB, logger *logrus.Logger, chatUC usecase.Chat
 
 func (handler *WebSocketHandler) HandleWebSocket(c *websocket.Conn) {
 	ctx := context.Background()
-
 	userID := c.Query("userId")
 
+	handler.Log.WS.Stream.Info().
+		Str("userId", userID).
+		Str("remoteAddr", c.RemoteAddr().String()).
+		Msg("WebSocket connection attempt")
+
 	if userID == "" {
-		handler.Logger.Error("WebSocket connection rejected: missing userId")
+		handler.Log.WS.Error.Error().
+			Str("remoteAddr", c.RemoteAddr().String()).
+			Msg("WebSocket connection rejected: missing userId")
+
 		c.WriteJSON(map[string]string{
 			"type":  "error",
 			"error": "userId is required",
@@ -61,19 +70,39 @@ func (handler *WebSocketHandler) HandleWebSocket(c *websocket.Conn) {
 		c.Close()
 	}()
 
-	_ = c.WriteJSON(map[string]string{
+	response := map[string]string{
 		"type":   "connected",
 		"userId": userID,
-	})
+	}
+	_ = c.WriteJSON(response)
 
+	handler.Log.WS.Stream.Info().
+		Str("userId", userID).
+		Str("type", "connected").
+		Msg("WebSocket connection established")
+
+	// Main message loop
 	for {
 		var msg BroadcastMessage
 		if err := c.ReadJSON(&msg); err != nil {
-			handler.Logger.Warnf("User %s disconnected: %v", userID, err)
+			handler.Log.WS.Warning.Warn().
+				Str("userId", userID).
+				Err(err).
+				Msg("User disconnected or read error")
 			break
 		}
 
+		msgJSON, _ := json.Marshal(msg)
+		handler.Log.WS.Stream.Info().
+			Str("userId", userID).
+			Str("messageType", msg.Type).
+			Str("payload", string(msgJSON)).
+			Msg("Incoming WebSocket message")
+
 		if msg.Type == "" {
+			handler.Log.WS.Warning.Warn().
+				Str("userId", userID).
+				Msg("Received message with empty type")
 			handler.sendError(c, "message type is required")
 			continue
 		}
@@ -90,36 +119,69 @@ func (handler *WebSocketHandler) HandleWebSocket(c *websocket.Conn) {
 		case "stop_typing":
 			handler.handleTyping(userID, msg.ChatID, false)
 		default:
-			handler.Logger.Warnf("Unknown message type: %s", msg.Type)
+			handler.Log.WS.Warning.Warn().
+				Str("userId", userID).
+				Str("messageType", msg.Type).
+				Msg("Unknown message type received")
 			handler.sendError(c, "unknown message type: "+msg.Type)
 		}
 	}
 }
 
 func (handler *WebSocketHandler) handleJoinRoom(ctx context.Context, c *websocket.Conn, userID string, msg BroadcastMessage) {
+	handler.Log.WS.Info.Info().
+		Str("userId", userID).
+		Str("chatId", msg.ChatID).
+		Str("receiverId", msg.ReceiverID).
+		Msg("Processing join_room request")
+
 	chatID, isNewChat, err := handler.joinRoom(ctx, userID, msg.ReceiverID, msg.ChatID)
 	if err != nil {
-		handler.Logger.Errorf("Join room failed for user %s: %v", userID, err)
+		handler.Log.WS.Error.Error().
+			Str("userId", userID).
+			Str("chatId", msg.ChatID).
+			Err(err).
+			Msg("Failed to join room")
 		handler.sendError(c, "failed to join room: "+err.Error())
 		return
 	}
 
-	_ = c.WriteJSON(map[string]string{
+	response := map[string]string{
 		"type":   "joined_room",
 		"chatId": chatID,
-	})
+	}
+	_ = c.WriteJSON(response)
 
-	// IMPROVEMENT: Broadcast new_chat ke receiver jika chat baru
+	handler.Log.WS.Stream.Info().
+		Str("userId", userID).
+		Str("chatId", chatID).
+		Bool("isNewChat", isNewChat).
+		Str("type", "joined_room").
+		Msg("Sent joined_room response")
+
 	if isNewChat && msg.ReceiverID != "" {
+		handler.Log.WS.Info.Info().
+			Str("chatId", chatID).
+			Str("senderId", userID).
+			Str("receiverId", msg.ReceiverID).
+			Msg("New chat created, notifying receiver")
 		handler.notifyNewChat(ctx, chatID, userID, msg.ReceiverID)
 	}
 }
 
 func (handler *WebSocketHandler) handleLeaveRoom(userID, chatID string) {
 	if chatID == "" {
-		handler.Logger.Warn("Leave room failed: chatId is empty")
+		handler.Log.WS.Warning.Warn().
+			Str("userId", userID).
+			Msg("Leave room failed: chatId is empty")
 		return
 	}
+
+	handler.Log.WS.Info.Info().
+		Str("userId", userID).
+		Str("chatId", chatID).
+		Msg("Processing leave_room request")
+
 	handler.leaveRoom(userID, chatID)
 }
 
@@ -127,18 +189,31 @@ func (handler *WebSocketHandler) joinRoom(ctx context.Context, userID, receiverI
 	var err error
 	isNewChat := false
 
-	// Use MessageUsecase untuk ensure chat
+	handler.Log.WS.Trace.Trace().
+		Str("userId", userID).
+		Str("receiverId", receiverID).
+		Str("chatId", chatID).
+		Msg("Ensuring chat exists")
+
 	chatID, err = handler.MessageUC.EnsureChat(ctx, chatID, userID, receiverID)
 	if err != nil {
+		handler.Log.WS.Error.Error().
+			Str("userId", userID).
+			Err(err).
+			Msg("Failed to ensure chat")
 		return "", false, err
 	}
 
-	// Check if this is a new chat (just created)
 	if chatID != "" && receiverID != "" {
-		// Cek apakah chat baru dibuat (belum ada messages)
 		var messageCount int64
 		handler.DB.Model(&entity.Messages{}).Where("chat_id = ?", chatID).Count(&messageCount)
 		isNewChat = messageCount == 0
+
+		handler.Log.WS.Trace.Trace().
+			Str("chatId", chatID).
+			Int64("messageCount", messageCount).
+			Bool("isNewChat", isNewChat).
+			Msg("Chat status checked")
 	}
 
 	handler.Mutex.Lock()
@@ -146,9 +221,18 @@ func (handler *WebSocketHandler) joinRoom(ctx context.Context, userID, receiverI
 
 	if handler.Rooms[chatID] == nil {
 		handler.Rooms[chatID] = make(map[string]*websocket.Conn)
+		handler.Log.WS.Trace.Trace().
+			Str("chatId", chatID).
+			Msg("Created new room")
 	}
+
 	handler.Rooms[chatID][userID] = handler.Clients[userID]
-	handler.Logger.Infof("User %s joined chat room %s", userID, chatID)
+
+	handler.Log.WS.Info.Info().
+		Str("userId", userID).
+		Str("chatId", chatID).
+		Int("roomSize", len(handler.Rooms[chatID])).
+		Msg("User joined chat room")
 
 	return chatID, isNewChat, nil
 }
@@ -159,24 +243,47 @@ func (handler *WebSocketHandler) leaveRoom(userID, chatID string) {
 
 	if room, ok := handler.Rooms[chatID]; ok {
 		delete(room, userID)
-		handler.Logger.Infof("User %s left chat room %s", userID, chatID)
+
+		handler.Log.WS.Info.Info().
+			Str("userId", userID).
+			Str("chatId", chatID).
+			Int("remainingUsers", len(room)).
+			Msg("User left chat room")
 
 		if len(room) == 0 {
 			delete(handler.Rooms, chatID)
-			handler.Logger.Infof("Chat room %s deleted (empty)", chatID)
+			handler.Log.WS.Info.Info().
+				Str("chatId", chatID).
+				Msg("Chat room deleted (empty)")
 		}
+	} else {
+		handler.Log.WS.Warning.Warn().
+			Str("userId", userID).
+			Str("chatId", chatID).
+			Msg("Attempted to leave non-existent room")
 	}
 }
 
 func (handler *WebSocketHandler) handleSendMessage(ctx context.Context, senderID string, msg BroadcastMessage) {
+	handler.Log.WS.Info.Info().
+		Str("senderId", senderID).
+		Str("chatId", msg.ChatID).
+		Int("contentLength", len(msg.Content)).
+		Msg("Processing send_message request")
+
 	if msg.ChatID == "" {
-		handler.Logger.Error("Send message failed: chatId is empty")
+		handler.Log.WS.Error.Error().
+			Str("senderId", senderID).
+			Msg("Send message failed: chatId is empty")
 		handler.sendErrorToUser(senderID, "chatId is required")
 		return
 	}
 
 	if msg.Content == "" {
-		handler.Logger.Error("Send message failed: content is empty")
+		handler.Log.WS.Error.Error().
+			Str("senderId", senderID).
+			Str("chatId", msg.ChatID).
+			Msg("Send message failed: content is empty")
 		handler.sendErrorToUser(senderID, "message content cannot be empty")
 		return
 	}
@@ -190,16 +297,22 @@ func (handler *WebSocketHandler) handleSendMessage(ctx context.Context, senderID
 
 	broadcastMsg, err := handler.MessageUC.ProcessIncomingMessage(ctx, msgRequest)
 	if err != nil {
-		handler.Logger.Errorf("ProcessIncomingMessage failed: %v", err)
+		handler.Log.WS.Error.Error().
+			Str("senderId", senderID).
+			Str("chatId", msg.ChatID).
+			Err(err).
+			Msg("Failed to process incoming message")
 		handler.sendErrorToUser(senderID, "failed to send message")
 		return
 	}
 
-	handler.Logger.Infof("Message created: ID=%s, ChatID=%s, Sender=%s",
-		broadcastMsg.MessageID, broadcastMsg.ChatID, broadcastMsg.SenderID)
+	handler.Log.WS.Info.Info().
+		Str("messageId", broadcastMsg.MessageID).
+		Str("chatId", broadcastMsg.ChatID).
+		Str("senderId", broadcastMsg.SenderID).
+		Msg("Message created successfully")
 
-	// Broadcast message ke semua participants di room
-	handler.broadcastToRoom(broadcastMsg.ChatID, map[string]interface{}{
+	broadcastPayload := map[string]interface{}{
 		"type":         "new_message",
 		"messageId":    broadcastMsg.MessageID,
 		"chatId":       broadcastMsg.ChatID,
@@ -209,9 +322,10 @@ func (handler *WebSocketHandler) handleSendMessage(ctx context.Context, senderID
 		"content":      broadcastMsg.Content,
 		"status":       broadcastMsg.Status,
 		"createdAt":    broadcastMsg.CreatedAt,
-	})
+	}
 
-	// 🔥 IMPROVEMENT: Notify receiver tentang chat baru jika mereka belum join room
+	handler.broadcastToRoom(broadcastMsg.ChatID, broadcastPayload)
+
 	handler.notifyOfflineParticipants(ctx, broadcastMsg.ChatID, senderID)
 }
 
@@ -221,73 +335,113 @@ func (handler *WebSocketHandler) broadcastToRoom(chatID string, message interfac
 	handler.Mutex.RUnlock()
 
 	if !exists {
-		handler.Logger.Warnf("Cannot broadcast: room %s not found", chatID)
+		handler.Log.WS.Warning.Warn().
+			Str("chatId", chatID).
+			Msg("Cannot broadcast: room not found")
 		return
 	}
+
+	successCount := 0
+	failCount := 0
 
 	for userID, conn := range room {
 		if err := conn.WriteJSON(message); err != nil {
-			handler.Logger.Errorf("Failed to send message to user %s: %v", userID, err)
+			handler.Log.WS.Error.Error().
+				Str("userId", userID).
+				Str("chatId", chatID).
+				Err(err).
+				Msg("Failed to send message to user")
+			failCount++
+		} else {
+			successCount++
 		}
 	}
 
-	handler.Logger.Infof("Message broadcasted to %d users in room %s", len(room), chatID)
+	handler.Log.WS.Stream.Info().
+		Str("chatId", chatID).
+		Int("successCount", successCount).
+		Int("failCount", failCount).
+		Int("totalUsers", len(room)).
+		Str("messageType", "new_message").
+		Msg("Message broadcast completed")
 }
 
-// 🔥 NEW: Notify receiver tentang chat baru
 func (handler *WebSocketHandler) notifyNewChat(ctx context.Context, chatID, senderID, receiverID string) {
-	handler.Logger.Infof("Notifying new chat: chatId=%s, sender=%s, receiver=%s", chatID, senderID, receiverID)
+	handler.Log.WS.Trace.Trace().
+		Str("chatId", chatID).
+		Str("senderId", senderID).
+		Str("receiverId", receiverID).
+		Msg("Fetching sender and chat info for new_chat notification")
 
-	// Get sender info
 	var sender entity.User
 	if err := handler.DB.Where("id = ?", senderID).First(&sender).Error; err != nil {
-		handler.Logger.Errorf("Failed to get sender info: %v", err)
+		handler.Log.WS.Error.Error().
+			Str("senderId", senderID).
+			Err(err).
+			Msg("Failed to get sender info")
 		return
 	}
 
-	// Get chat info
 	chat, err := handler.ChatUC.FindChatByID(ctx, handler.DB, chatID)
 	if err != nil {
-		handler.Logger.Errorf("Failed to get chat info: %v", err)
+		handler.Log.WS.Error.Error().
+			Str("chatId", chatID).
+			Err(err).
+			Msg("Failed to get chat info")
 		return
 	}
 
-	// Prepare new_chat notification
 	notification := map[string]interface{}{
 		"type":         "new_chat",
 		"chatId":       chatID,
 		"chatUsername": sender.Name,
 		"chatAvatar":   sender.Avatar,
 		"chatType":     string(chat.ChatType),
-		"lastMessage":  "", // Belum ada message
+		"lastMessage":  "",
 		"unreadCount":  0,
 	}
 
-	// Send ke receiver jika online
 	handler.sendToUser(receiverID, notification)
+
+	handler.Log.WS.Stream.Info().
+		Str("receiverId", receiverID).
+		Str("chatId", chatID).
+		Str("type", "new_chat").
+		Msg("Sent new_chat notification")
 }
 
-// 🔥 NEW: Notify participants yang belum join room (offline atau di chat lain)
 func (handler *WebSocketHandler) notifyOfflineParticipants(ctx context.Context, chatID, senderID string) {
-	// Get all participants
+	handler.Log.WS.Trace.Trace().
+		Str("chatId", chatID).
+		Str("senderId", senderID).
+		Msg("Checking offline participants for notification")
+
 	var participants []entity.ChatParticipant
 	if err := handler.DB.Where("chat_id = ?", chatID).Find(&participants).Error; err != nil {
-		handler.Logger.Errorf("Failed to get participants: %v", err)
+		handler.Log.WS.Error.Error().
+			Str("chatId", chatID).
+			Err(err).
+			Msg("Failed to get participants")
 		return
 	}
 
-	// Get sender info
 	var sender entity.User
 	if err := handler.DB.Where("id = ?", senderID).First(&sender).Error; err != nil {
-		handler.Logger.Errorf("Failed to get sender info: %v", err)
+		handler.Log.WS.Error.Error().
+			Str("senderId", senderID).
+			Err(err).
+			Msg("Failed to get sender info")
 		return
 	}
 
-	// Get last message
 	var lastMessage entity.Messages
 	if err := handler.DB.Where("chat_id = ?", chatID).
 		Order("created_at DESC").
 		First(&lastMessage).Error; err != nil {
+		handler.Log.WS.Warning.Warn().
+			Str("chatId", chatID).
+			Err(err).
+			Msg("No messages found in chat")
 		return
 	}
 
@@ -295,20 +449,23 @@ func (handler *WebSocketHandler) notifyOfflineParticipants(ctx context.Context, 
 	room := handler.Rooms[chatID]
 	handler.Mutex.RUnlock()
 
-	// Notify participants yang tidak ada di room (belum join atau offline)
+	offlineCount := 0
+
 	for _, p := range participants {
 		if p.UserID == senderID {
-			continue // Skip sender
+			continue
 		}
 
-		// Check if user is in room
 		if room != nil {
 			if _, inRoom := room[p.UserID]; inRoom {
-				continue // Skip if already in room (sudah dapat broadcast)
+				handler.Log.WS.Trace.Trace().
+					Str("userId", p.UserID).
+					Str("chatId", chatID).
+					Msg("User already in room, skipping notification")
+				continue
 			}
 		}
 
-		// Get unread count for this user
 		var unreadCount int64
 		handler.DB.Model(&entity.MessageStatus{}).
 			Joins("JOIN t_messages ON t_messages.id = t_message_status.message_id").
@@ -316,7 +473,6 @@ func (handler *WebSocketHandler) notifyOfflineParticipants(ctx context.Context, 
 				p.UserID, chatID).
 			Count(&unreadCount)
 
-		// Send chat_update notification
 		notification := map[string]interface{}{
 			"type":            "chat_update",
 			"chatId":          chatID,
@@ -328,29 +484,54 @@ func (handler *WebSocketHandler) notifyOfflineParticipants(ctx context.Context, 
 		}
 
 		handler.sendToUser(p.UserID, notification)
+		offlineCount++
+	}
+
+	if offlineCount > 0 {
+		handler.Log.WS.Info.Info().
+			Str("chatId", chatID).
+			Int("notifiedCount", offlineCount).
+			Msg("Notified offline participants")
 	}
 }
 
-// 🔥 NEW: Send message ke specific user
 func (handler *WebSocketHandler) sendToUser(userID string, message interface{}) {
 	handler.Mutex.RLock()
 	conn, exists := handler.Clients[userID]
 	handler.Mutex.RUnlock()
 
 	if !exists {
-		handler.Logger.Debugf("User %s is offline, cannot send notification", userID)
+		handler.Log.WS.Trace.Trace().
+			Str("userId", userID).
+			Msg("User is offline, cannot send notification")
 		return
 	}
 
 	if err := conn.WriteJSON(message); err != nil {
-		handler.Logger.Errorf("Failed to send to user %s: %v", userID, err)
+		handler.Log.WS.Error.Error().
+			Str("userId", userID).
+			Err(err).
+			Msg("Failed to send notification to user")
 	} else {
-		handler.Logger.Infof("Notification sent to user %s", userID)
+		msgType := "unknown"
+		if m, ok := message.(map[string]interface{}); ok {
+			if t, ok := m["type"].(string); ok {
+				msgType = t
+			}
+		}
+
+		handler.Log.WS.Stream.Info().
+			Str("userId", userID).
+			Str("messageType", msgType).
+			Msg("Notification sent to user")
 	}
 }
 
 func (handler *WebSocketHandler) handleTyping(userID, chatID string, isTyping bool) {
 	if chatID == "" {
+		handler.Log.WS.Warning.Warn().
+			Str("userId", userID).
+			Msg("Typing event failed: chatId is empty")
 		return
 	}
 
@@ -359,6 +540,10 @@ func (handler *WebSocketHandler) handleTyping(userID, chatID string, isTyping bo
 	handler.Mutex.RUnlock()
 
 	if !exists {
+		handler.Log.WS.Warning.Warn().
+			Str("userId", userID).
+			Str("chatId", chatID).
+			Msg("Typing event failed: room not found")
 		return
 	}
 
@@ -369,11 +554,21 @@ func (handler *WebSocketHandler) handleTyping(userID, chatID string, isTyping bo
 		"isTyping": isTyping,
 	}
 
+	sentCount := 0
 	for uid, conn := range room {
 		if uid != userID {
-			_ = conn.WriteJSON(typingMsg)
+			if err := conn.WriteJSON(typingMsg); err == nil {
+				sentCount++
+			}
 		}
 	}
+
+	handler.Log.WS.Trace.Trace().
+		Str("userId", userID).
+		Str("chatId", chatID).
+		Bool("isTyping", isTyping).
+		Int("sentCount", sentCount).
+		Msg("Typing indicator broadcasted")
 }
 
 func (handler *WebSocketHandler) sendErrorToUser(userID, errorMsg string) {
@@ -382,25 +577,44 @@ func (handler *WebSocketHandler) sendErrorToUser(userID, errorMsg string) {
 	handler.Mutex.RUnlock()
 
 	if exists {
-		_ = conn.WriteJSON(map[string]string{
+		errorPayload := map[string]string{
 			"type":  "error",
 			"error": errorMsg,
-		})
+		}
+		_ = conn.WriteJSON(errorPayload)
+
+		handler.Log.WS.Stream.Error().
+			Str("userId", userID).
+			Str("error", errorMsg).
+			Str("type", "error").
+			Msg("Sent error response to user")
 	}
 }
 
 func (handler *WebSocketHandler) sendError(c *websocket.Conn, errorMsg string) {
-	_ = c.WriteJSON(map[string]string{
+	errorPayload := map[string]string{
 		"type":  "error",
 		"error": errorMsg,
-	})
+	}
+	_ = c.WriteJSON(errorPayload)
+
+	handler.Log.WS.Stream.Error().
+		Str("error", errorMsg).
+		Str("type", "error").
+		Msg("Sent error response")
 }
 
 func (handler *WebSocketHandler) registerClient(userID string, conn *websocket.Conn) {
 	handler.Mutex.Lock()
 	defer handler.Mutex.Unlock()
+
 	handler.Clients[userID] = conn
-	handler.Logger.Infof("User connected: %s (Total: %d)", userID, len(handler.Clients))
+
+	handler.Log.WS.Info.Info().
+		Str("userId", userID).
+		Int("totalClients", len(handler.Clients)).
+		Str("remoteAddr", conn.RemoteAddr().String()).
+		Msg("User registered successfully")
 }
 
 func (handler *WebSocketHandler) removeClient(userID string, conn *websocket.Conn) {
@@ -409,16 +623,29 @@ func (handler *WebSocketHandler) removeClient(userID string, conn *websocket.Con
 
 	delete(handler.Clients, userID)
 
+	roomsLeft := 0
 	for chatID, room := range handler.Rooms {
 		if _, exists := room[userID]; exists {
 			delete(room, userID)
-			handler.Logger.Infof("User %s removed from room %s", userID, chatID)
+			roomsLeft++
+
+			handler.Log.WS.Trace.Trace().
+				Str("userId", userID).
+				Str("chatId", chatID).
+				Msg("User removed from room during disconnect")
 
 			if len(room) == 0 {
 				delete(handler.Rooms, chatID)
+				handler.Log.WS.Trace.Trace().
+					Str("chatId", chatID).
+					Msg("Empty room deleted during user disconnect")
 			}
 		}
 	}
 
-	handler.Logger.Infof("User disconnected: %s (Remaining: %d)", userID, len(handler.Clients))
+	handler.Log.WS.Info.Info().
+		Str("userId", userID).
+		Int("remainingClients", len(handler.Clients)).
+		Int("roomsLeft", roomsLeft).
+		Msg("User disconnected and cleaned up")
 }

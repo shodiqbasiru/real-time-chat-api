@@ -2,9 +2,10 @@ package usecase
 
 import (
 	"context"
+	"errors"
 	"github.com/go-playground/validator/v10"
-	"github.com/sirupsen/logrus"
 	"gorm.io/gorm"
+	"real-time-chat-app/config/logger"
 	"real-time-chat-app/dto/res"
 	"real-time-chat-app/entity"
 	"real-time-chat-app/repository"
@@ -15,30 +16,52 @@ type UserUsecaseImpl struct {
 	*repository.UserRepository
 	*validator.Validate
 	*gorm.DB
-	*logrus.Logger
+	Log *logger.AppLogger
 	*security.JWT
 }
 
-func NewUserUsecase(userRepository *repository.UserRepository, validate *validator.Validate, DB *gorm.DB, logger *logrus.Logger, JWT *security.JWT) UserUsecase {
-	return &UserUsecaseImpl{UserRepository: userRepository, Validate: validate, DB: DB, Logger: logger, JWT: JWT}
+func NewUserUsecase(userRepository *repository.UserRepository, validate *validator.Validate, DB *gorm.DB, logger *logger.AppLogger, JWT *security.JWT) UserUsecase {
+	return &UserUsecaseImpl{UserRepository: userRepository, Validate: validate, DB: DB, Log: logger, JWT: JWT}
 }
 
 func (uc *UserUsecaseImpl) GetUserByID(ctx context.Context, token string) (res.UserResponse, error) {
-	uc.Logger.Infof("GetUserByID.token <=====> %v", token)
+	uc.Log.Http.Info.Info().Msg("GetUserByID started")
+	uc.Log.Http.Trace.Trace().Msg("Extracting user ID from token")
 
 	// get id by token user
 	userIdFromToken, err := uc.JWT.GetUserIdFromToken(token)
 	if err != nil {
-		uc.Logger.WithError(err).Errorf("Failed to find user id by token")
-		return res.UserResponse{}, err
+		uc.Log.Http.Error.Error().
+			Err(err).
+			Msg("Failed to extract user ID from token")
+		return res.UserResponse{}, errors.New("invalid token")
 	}
+
+	uc.Log.Http.Trace.Trace().
+		Str("userId", userIdFromToken).
+		Msg("Finding user by ID")
 
 	// find user by id
 	var user entity.User
 	if err := uc.UserRepository.FindById(ctx, uc.DB, &user, userIdFromToken); err != nil {
-		uc.Logger.WithError(err).Errorf("Failed to find user = %v", err)
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			uc.Log.Http.Warning.Warn().
+				Str("userId", userIdFromToken).
+				Msg("User not found")
+		} else {
+			uc.Log.Http.Error.Error().
+				Err(err).
+				Str("userId", userIdFromToken).
+				Msg("Failed to find user")
+		}
 		return res.UserResponse{}, err
 	}
+
+	uc.Log.Http.Info.Info().
+		Str("userId", user.ID).
+		Str("userName", user.Name).
+		Str("email", user.Email).
+		Msg("Successfully retrieved user")
 
 	// mapping user response
 	return res.UserResponse{
@@ -51,15 +74,24 @@ func (uc *UserUsecaseImpl) GetUserByID(ctx context.Context, token string) (res.U
 }
 
 func (uc *UserUsecaseImpl) GetAllUser(ctx context.Context) ([]res.UserResponse, error) {
-	// find user by id
+	uc.Log.Http.Info.Info().Msg("GetAllUser started")
+
+	uc.Log.Http.Trace.Trace().Msg("Fetching all users from database")
+
+	// Find all users
 	var users []entity.User
 	if err := uc.UserRepository.FindAll(ctx, uc.DB, &users); err != nil {
-		uc.Logger.WithError(err).Errorf("Failed to get all = %v", err)
+		uc.Log.Http.Error.Error().
+			Err(err).
+			Msg("Failed to get all users")
 		return nil, err
 	}
 
-	var userResponses []res.UserResponse
+	uc.Log.Http.Trace.Trace().
+		Int("userCount", len(users)).
+		Msg("Mapping user entities to responses")
 
+	var userResponses []res.UserResponse
 	for _, user := range users {
 		userResponses = append(userResponses, res.UserResponse{
 			ID:          user.ID,
@@ -70,6 +102,9 @@ func (uc *UserUsecaseImpl) GetAllUser(ctx context.Context) ([]res.UserResponse, 
 		})
 	}
 
-	// mapping user response
+	uc.Log.Http.Info.Info().
+		Int("userCount", len(userResponses)).
+		Msg("Successfully retrieved all users")
+
 	return userResponses, nil
 }
