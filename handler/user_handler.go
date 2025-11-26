@@ -29,7 +29,7 @@ func (handler *UserHandler) GetUserByToken(ctx *fiber.Ctx) error {
 		Str("path", ctx.Path()).
 		Msg("Processing get user by token request")
 
-	userResponse, err := handler.UserUsecase.GetUserByID(ctx.Context(), token)
+	userResponse, err := handler.UserUsecase.GetUserIDByToken(ctx.Context(), token)
 	if err != nil {
 		handler.Log.Http.Error.Error().
 			Err(err).
@@ -110,6 +110,48 @@ func (handler *UserHandler) GetAllUsers(ctx *fiber.Ctx) error {
 		Msg("Response: Successfully retrieved all users")
 
 	return ctx.Status(fiber.StatusOK).JSON(responses)
+}
+
+func (handler *UserHandler) GetUser(ctx *fiber.Ctx) error {
+	userId := ctx.Params("userId")
+	handler.Log.Http.Stream.Info().
+		Str("method", ctx.Method()).
+		Str("path", ctx.Path()).
+		Str("userId", userId).
+		Str("ip", ctx.IP()).
+		Msg("Incoming request: Get User By Id")
+
+	userResponse, err := handler.UserUsecase.GetUserByID(ctx.Context(), userId)
+	if err != nil {
+		handler.Log.Http.Error.Error().
+			Err(err).
+			Str("path", ctx.Path()).
+			Msg("Failed to get a user")
+
+		handler.Log.Http.Stream.Error().
+			Err(err).
+			Int("statusCode", fiber.StatusInternalServerError).
+			Msg("Response: Failed to get a user")
+
+		return ctx.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": err.Error(),
+		})
+	}
+
+	response := res.CommonResponse[res.UserResponse]{
+		Message:    "Successfully To Get a User",
+		StatusCode: fiber.StatusOK,
+		Data:       userResponse,
+	}
+
+	handler.Log.Http.Info.Info().
+		Msg("Successfully to get a user")
+
+	handler.Log.Http.Stream.Info().
+		Int("statusCode", fiber.StatusOK).
+		Msg("Response: Successfully to get a user")
+
+	return ctx.Status(fiber.StatusOK).JSON(response)
 }
 
 func (handler *UserHandler) EditUser(ctx *fiber.Ctx) error {

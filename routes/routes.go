@@ -34,7 +34,7 @@ func (rc *ConfigRoute) GetProtectedRoute() {
 
 	// users endpoint
 	app.Get("/users", rc.UserHandler.GetAllUsers)
-	app.Put("/users/profile/:userId", rc.UserHandler.EditUser)
+	app.Get("/users/:userId", rc.UserHandler.GetUser)
 
 	//chat endpoint
 	app.Get("/chats/:chatId/messages", rc.ChatHandler.GetMessagesByID)

@@ -1,13 +1,18 @@
 package entity
 
-import "real-time-chat-app/enum"
+import (
+	"real-time-chat-app/enum"
+	"time"
+)
 
 type Messages struct {
 	BaseEntity
-	Content  string             `json:"content" gorm:"type:TEXT"`
-	ChatId   string             `json:"chatId" gorm:"foreignKey"`
-	SenderId string             `json:"senderId" gorm:"foreignKey"`
-	Status   enum.MessageStatus ` json:"status" gorm:"type:varchar(20);default:'sent'"`
+	Content     string             `json:"content" gorm:"type:TEXT"`
+	ChatId      string             `json:"chatId" gorm:"foreignKey"`
+	SenderId    string             `json:"senderId" gorm:"foreignKey"`
+	Status      enum.MessageStatus ` json:"status" gorm:"type:varchar(20);default:'sent'"`
+	DeliveredAt *time.Time         `json:"deliveredAt" gorm:"null"` // NEW
+	ReadAt      *time.Time         `json:"readAt" gorm:"null"`      // N
 
 	Chat   Chat `json:"-" gorm:"foreignKey:ChatId;references:ID"`
 	Sender User `json:"-" gorm:"foreignKey:SenderId;references:ID"`

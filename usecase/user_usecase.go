@@ -6,6 +6,7 @@ import (
 )
 
 type UserUsecase interface {
-	GetUserByID(ctx context.Context, token string) (res.UserResponse, error)
+	GetUserIDByToken(ctx context.Context, token string) (res.UserResponse, error)
+	GetUserByID(ctx context.Context, userId string) (res.UserResponse, error)
 	GetAllUser(ctx context.Context) ([]res.UserResponse, error)
 }

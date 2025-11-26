@@ -24,7 +24,7 @@ func NewUserUsecase(userRepository *repository.UserRepository, validate *validat
 	return &UserUsecaseImpl{UserRepository: userRepository, Validate: validate, DB: DB, Log: logger, JWT: JWT}
 }
 
-func (uc *UserUsecaseImpl) GetUserByID(ctx context.Context, token string) (res.UserResponse, error) {
+func (uc *UserUsecaseImpl) GetUserIDByToken(ctx context.Context, token string) (res.UserResponse, error) {
 	uc.Log.Http.Info.Info().Msg("GetUserByID started")
 	uc.Log.Http.Trace.Trace().Msg("Extracting user ID from token")
 
@@ -41,36 +41,11 @@ func (uc *UserUsecaseImpl) GetUserByID(ctx context.Context, token string) (res.U
 		Str("userId", userIdFromToken).
 		Msg("Finding user by ID")
 
-	// find user by id
-	var user entity.User
-	if err := uc.UserRepository.FindById(ctx, uc.DB, &user, userIdFromToken); err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			uc.Log.Http.Warning.Warn().
-				Str("userId", userIdFromToken).
-				Msg("User not found")
-		} else {
-			uc.Log.Http.Error.Error().
-				Err(err).
-				Str("userId", userIdFromToken).
-				Msg("Failed to find user")
-		}
-		return res.UserResponse{}, err
-	}
+	return getUserId(ctx, uc, userIdFromToken)
+}
 
-	uc.Log.Http.Info.Info().
-		Str("userId", user.ID).
-		Str("userName", user.Name).
-		Str("email", user.Email).
-		Msg("Successfully retrieved user")
-
-	// mapping user response
-	return res.UserResponse{
-		ID:          user.ID,
-		Name:        user.Name,
-		Email:       user.Email,
-		PhoneNumber: user.PhoneNumber,
-		CreatedAt:   user.CreatedAt.Format("2006-01-02 15:04:05"),
-	}, nil
+func (uc *UserUsecaseImpl) GetUserByID(ctx context.Context, userId string) (res.UserResponse, error) {
+	return getUserId(ctx, uc, userId)
 }
 
 func (uc *UserUsecaseImpl) GetAllUser(ctx context.Context) ([]res.UserResponse, error) {
@@ -107,4 +82,37 @@ func (uc *UserUsecaseImpl) GetAllUser(ctx context.Context) ([]res.UserResponse, 
 		Msg("Successfully retrieved all users")
 
 	return userResponses, nil
+}
+
+func getUserId(ctx context.Context, uc *UserUsecaseImpl, userId string) (res.UserResponse, error) {
+	// find user by id
+	var user entity.User
+	if err := uc.UserRepository.FindById(ctx, uc.DB, &user, userId); err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			uc.Log.Http.Warning.Warn().
+				Str("userId", userId).
+				Msg("User not found")
+		} else {
+			uc.Log.Http.Error.Error().
+				Err(err).
+				Str("userId", userId).
+				Msg("Failed to find user")
+		}
+		return res.UserResponse{}, err
+	}
+
+	uc.Log.Http.Info.Info().
+		Str("userId", user.ID).
+		Str("userName", user.Name).
+		Str("email", user.Email).
+		Msg("Successfully retrieved user")
+
+	// mapping user response
+	return res.UserResponse{
+		ID:          user.ID,
+		Name:        user.Name,
+		Email:       user.Email,
+		PhoneNumber: user.PhoneNumber,
+		CreatedAt:   user.CreatedAt.Format("2006-01-02 15:04:05"),
+	}, nil
 }
