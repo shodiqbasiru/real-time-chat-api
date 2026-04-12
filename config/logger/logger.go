@@ -2,11 +2,12 @@ package logger
 
 import (
 	"fmt"
-	"github.com/rs/zerolog"
-	"gopkg.in/natefinch/lumberjack.v2"
 	"io"
 	"os"
 	"strings"
+
+	"github.com/rs/zerolog"
+	"gopkg.in/natefinch/lumberjack.v2"
 )
 
 type CommonLogger struct {
@@ -94,7 +95,12 @@ func fileConsoleWriter(filename string) io.Writer {
 			return fmt.Sprintf("%s=", i)
 		},
 		FormatFieldValue: func(i interface{}) string {
-			return fmt.Sprintf("%v", i)
+			switch v := i.(type) {
+			case []byte:
+				return string(v)
+			default:
+				return fmt.Sprintf("%v", v)
+			}
 		},
 	}
 }

@@ -3,13 +3,14 @@ package usecase
 import (
 	"context"
 	"errors"
-	"github.com/go-playground/validator/v10"
-	"gorm.io/gorm"
 	"real-time-chat-app/config/logger"
 	"real-time-chat-app/dto/res"
 	"real-time-chat-app/entity"
 	"real-time-chat-app/repository"
 	"real-time-chat-app/security"
+
+	"github.com/go-playground/validator/v10"
+	"gorm.io/gorm"
 )
 
 type UserUsecaseImpl struct {
@@ -82,6 +83,24 @@ func (uc *UserUsecaseImpl) GetAllUser(ctx context.Context) ([]res.UserResponse, 
 		Msg("Successfully retrieved all users")
 
 	return userResponses, nil
+}
+
+func (uc *UserUsecaseImpl) FindUser(ctx context.Context, userId string) (*entity.User, error) {
+	user, err := uc.UserRepository.FindUserByID(ctx, uc.DB, userId)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			uc.Log.Http.Warning.Warn().
+				Str("userId", userId).
+				Msg("User not found")
+		} else {
+			uc.Log.Http.Error.Error().
+				Err(err).
+				Str("userId", userId).
+				Msg("Failed to find user")
+		}
+		return nil, err
+	}
+	return user, nil
 }
 
 func getUserId(ctx context.Context, uc *UserUsecaseImpl, userId string) (res.UserResponse, error) {

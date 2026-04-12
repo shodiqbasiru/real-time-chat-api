@@ -4,33 +4,40 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"gorm.io/gorm"
 	"real-time-chat-app/config/logger"
+	"real-time-chat-app/dto/req"
 	"real-time-chat-app/dto/res"
 	"real-time-chat-app/entity"
 	"real-time-chat-app/enum"
+	"real-time-chat-app/mapper"
 	"real-time-chat-app/repository"
 	"real-time-chat-app/security"
+
+	"gorm.io/gorm"
 )
 
 type ChatUsecaseImpl struct {
 	*repository.ChatRepository
+	MessageUsecase
+	UserUsecase
 	Log *logger.AppLogger
 	*gorm.DB
 	*security.JWT
 }
 
-func NewChatUsecase(chatRepository *repository.ChatRepository, logger *logger.AppLogger, DB *gorm.DB, JWT *security.JWT) *ChatUsecaseImpl {
-	return &ChatUsecaseImpl{ChatRepository: chatRepository, Log: logger, DB: DB, JWT: JWT}
+func NewChatUsecase(chatRepository *repository.ChatRepository, messageUC MessageUsecase, userUC UserUsecase, logger *logger.AppLogger, DB *gorm.DB, JWT *security.JWT) *ChatUsecaseImpl {
+	return &ChatUsecaseImpl{ChatRepository: chatRepository, MessageUsecase: messageUC, UserUsecase: userUC, Log: logger, DB: DB, JWT: JWT}
 }
 
-func (uc *ChatUsecaseImpl) EnsurePersonalChat(ctx context.Context, userAID, userBID string) (*entity.Chat, error) {
+func (uc *ChatUsecaseImpl) CreatePersonalChat(ctx context.Context, userAID, userBID, content string) (*res.CreateChatResponse, error) {
 	uc.Log.Http.Info.Info().
+		Str("chatId", content).
 		Str("userAID", userAID).
 		Str("userBID", userBID).
-		Msg("EnsurePersonalChat started")
+		Msg("CreatePersonalChat started")
 
 	uc.Log.Http.Trace.Trace().
+		Str("chatId", content).
 		Str("userAID", userAID).
 		Str("userBID", userBID).
 		Msg("Checking for existing personal chat")
@@ -51,7 +58,7 @@ func (uc *ChatUsecaseImpl) EnsurePersonalChat(ctx context.Context, userAID, user
 			Str("userAID", userAID).
 			Str("userBID", userBID).
 			Msg("Personal chat already exists")
-		return existingChat, nil
+		return nil, nil
 	}
 
 	uc.Log.Http.Trace.Trace().
@@ -77,13 +84,34 @@ func (uc *ChatUsecaseImpl) EnsurePersonalChat(ctx context.Context, userAID, user
 		return nil, err
 	}
 
+	newMessage := req.MessageRequest{
+		ChatID:     newChat.ID,
+		SenderID:   userAID,
+		ReceiverID: userBID,
+		Content:    content,
+	}
+
+	BCMessage, err := uc.MessageUsecase.ProcessIncomingMessage(ctx, newMessage)
+	if err != nil {
+		uc.Log.Http.Error.Error().
+			Err(err).
+			Msg("Failed to create newChat")
+		return nil, fmt.Errorf("failed to create message: %w", err)
+	}
+
+	receiver, _ := uc.UserUsecase.FindUser(ctx, userBID)
+
 	uc.Log.Http.Info.Info().
 		Str("chatId", newChat.ID).
 		Str("userAID", userAID).
 		Str("userBID", userBID).
 		Msg("Personal chat created successfully")
 
-	return newChat, nil
+	return mapper.MapperCreateChatResponse(*newChat, *receiver, BCMessage), err
+}
+
+func (uc *ChatUsecaseImpl) IsUserInChat(ctx context.Context, chatID, userID string) (bool, error) {
+	return uc.ChatRepository.IsUserInChat(ctx, uc.DB, chatID, userID)
 }
 
 func (uc *ChatUsecaseImpl) CreateGroupChat(ctx context.Context, name string, creatorID string, memberIDs []string) (*entity.Chat, error) {
@@ -132,12 +160,12 @@ func (uc *ChatUsecaseImpl) CreateGroupChat(ctx context.Context, name string, cre
 	return newChat, nil
 }
 
-func (uc *ChatUsecaseImpl) FindChatByID(ctx context.Context, db *gorm.DB, chatID string) (*entity.Chat, error) {
+func (uc *ChatUsecaseImpl) FindChatByID(ctx context.Context, chatID string) (*entity.Chat, error) {
 	uc.Log.Http.Trace.Trace().
 		Str("chatId", chatID).
 		Msg("Finding chat by ID")
 
-	chat, err := uc.ChatRepository.FindChatByID(ctx, db, chatID)
+	chat, err := uc.ChatRepository.FindChatByID(ctx, uc.DB, chatID)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			uc.Log.Http.Warning.Warn().
@@ -205,6 +233,7 @@ func (uc *ChatUsecaseImpl) GetChatsByUser(ctx context.Context, token string) ([]
 
 	for _, chat := range chats {
 		var chatUsername string
+		var charReceiverId string
 
 		if chat.ChatType == enum.PRIVATE {
 			// Find other participant
@@ -213,6 +242,7 @@ func (uc *ChatUsecaseImpl) GetChatsByUser(ctx context.Context, token string) ([]
 					var otherUser entity.User
 					if err := uc.DB.First(&otherUser, "id = ?", participant.UserID).Error; err == nil {
 						chatUsername = otherUser.Name
+						charReceiverId = otherUser.ID
 					} else {
 						uc.Log.Http.Warning.Warn().
 							Err(err).
@@ -247,6 +277,7 @@ func (uc *ChatUsecaseImpl) GetChatsByUser(ctx context.Context, token string) ([]
 
 		chatResponses = append(chatResponses, res.ChatResponse{
 			ChatId:          chat.ID,
+			ReceiverId:      charReceiverId,
 			ChatUsername:    chatUsername,
 			LastMessage:     lastMessageContent,
 			UnreadCount:     uint(unread),

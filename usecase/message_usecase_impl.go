@@ -13,81 +13,16 @@ import (
 )
 
 type messageUsecase struct {
-	db          *gorm.DB
-	chatUsecase ChatUsecase
-	log         *logger.AppLogger
+	db  *gorm.DB
+	log *logger.AppLogger
 }
 
-func NewMessageUsecase(db *gorm.DB, chatUC ChatUsecase, logger *logger.AppLogger) MessageUsecase {
+func NewMessageUsecase(db *gorm.DB, logger *logger.AppLogger) MessageUsecase {
 	logger.Http.Info.Info().Msg("Message usecase initialized")
 	return &messageUsecase{
-		db:          db,
-		chatUsecase: chatUC,
-		log:         logger,
+		db:  db,
+		log: logger,
 	}
-}
-
-func (uc *messageUsecase) EnsureChat(ctx context.Context, chatID, senderID, receiverID string) (string, error) {
-	uc.log.Http.Info.Info().
-		Str("chatId", chatID).
-		Str("senderId", senderID).
-		Str("receiverId", receiverID).
-		Msg("EnsureChat started")
-
-	// Create new personal chat if chatID is empty
-	if chatID == "" && receiverID != "" {
-		uc.log.Http.Trace.Trace().
-			Str("senderId", senderID).
-			Str("receiverId", receiverID).
-			Msg("Creating or finding personal chat")
-
-		chat, err := uc.chatUsecase.EnsurePersonalChat(ctx, senderID, receiverID)
-		if err != nil {
-			uc.log.Http.Error.Error().
-				Err(err).
-				Str("senderId", senderID).
-				Str("receiverId", receiverID).
-				Msg("Failed to ensure personal chat")
-			return "", err
-		}
-
-		uc.log.Http.Info.Info().
-			Str("chatId", chat.ID).
-			Str("senderId", senderID).
-			Str("receiverId", receiverID).
-			Msg("Personal chat ensured")
-
-		return chat.ID, nil
-	}
-
-	// Verify existing chat
-	if chatID != "" {
-		uc.log.Http.Trace.Trace().
-			Str("chatId", chatID).
-			Msg("Verifying existing chat")
-
-		_, err := uc.chatUsecase.FindChatByID(ctx, uc.db, chatID)
-		if err != nil {
-			uc.log.Http.Error.Error().
-				Err(err).
-				Str("chatId", chatID).
-				Msg("Chat not found or error occurred")
-			return "", err
-		}
-
-		uc.log.Http.Trace.Trace().
-			Str("chatId", chatID).
-			Msg("Chat verified")
-
-		return chatID, nil
-	}
-
-	uc.log.Http.Warning.Warn().
-		Str("chatId", chatID).
-		Str("receiverId", receiverID).
-		Msg("Invalid chat session - both chatId and receiverId are empty")
-
-	return "", fmt.Errorf("invalid chat session")
 }
 
 func (uc *messageUsecase) ProcessIncomingMessage(ctx context.Context, payload req.MessageRequest) (dto.BroadcastMessage, error) {

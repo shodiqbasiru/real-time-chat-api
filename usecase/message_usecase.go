@@ -7,7 +7,7 @@ import (
 )
 
 type MessageUsecase interface {
-	EnsureChat(ctx context.Context, chatID, senderID, receiverID string) (string, error)
+	// ProcessIncomingMessage EnsureChat(ctx context.Context, chatID, senderID, receiverID string) (string, error)
 	ProcessIncomingMessage(ctx context.Context, payload req.MessageRequest) (dto.BroadcastMessage, error)
 	MarkMessagesAsRead(ctx context.Context, chatID, userID string) error
 }

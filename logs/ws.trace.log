@@ -1,0 +1,15 @@
+[2025-12-22 22:03:26.058] [INFO] handleJoinRoom.isNewChat isNewChat=[102 97 108 115 101]
+[2025-12-22 22:24:50.522] [INFO] handleJoinRoom.isNewChat isNewChat=true
+[2025-12-22 22:24:50.528] [INFO] new chat response chatId=cc85e7df-e0ae-4377-b62f-519c2b05c504
+[2025-12-22 22:25:39.349] [INFO] handleJoinRoom.isNewChat isNewChat=true
+[2025-12-22 22:25:39.350] [INFO] new chat response chatId=4d3411e8-2331-4dfa-a14a-392c754d9f7f
+[2025-12-22 22:27:29.200] [INFO] handleJoinRoom.isNewChat isNewChat=true
+[2025-12-22 22:27:29.200] [INFO] new chat response chatId=5bbdb7a0-4a60-41b7-aaf2-c56b174ea741
+[2025-12-22 22:28:57.552] [INFO] handleJoinRoom.isNewChat isNewChat=true
+[2025-12-22 22:28:57.553] [INFO] new chat response chatId=f1d2e901-5f5b-471f-9504-6d468dc65234
+[2025-12-23 10:53:36.686] [INFO] handleJoinRoom.isNewChat isNewChat=true
+[2025-12-23 10:53:36.697] [INFO] new chat response chatId=f6db5168-f433-40f1-bde1-36cd9319983b
+[2025-12-23 19:54:37.830] [INFO] handleJoinRoom.isNewChat isNewChat=true
+[2025-12-23 19:54:37.835] [INFO] new chat response chatId=38179140-654b-46a7-8c90-5a163cc815ef
+[2025-12-23 19:58:13.414] [INFO] handleJoinRoom.isNewChat isNewChat=true
+[2025-12-23 19:58:13.486] [INFO] new chat response chatId=d9f866f8-9e90-4e4c-ad3a-bb22a0b51669

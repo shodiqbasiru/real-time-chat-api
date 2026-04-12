@@ -1,11 +1,12 @@
 package handler
 
 import (
-	"github.com/gofiber/fiber/v2"
 	"real-time-chat-app/config/logger"
 	"real-time-chat-app/dto/req"
 	"real-time-chat-app/dto/res"
 	"real-time-chat-app/usecase"
+
+	"github.com/gofiber/fiber/v2"
 )
 
 type AuthHandler struct {
@@ -19,7 +20,7 @@ func NewAuthHandler(authUseCase usecase.AuthUsecase, logger *logger.AppLogger) *
 }
 
 func (handler *AuthHandler) RegisterUser(ctx *fiber.Ctx) error {
-	// 📥 STREAM: Log incoming request
+	// STREAM: Log incoming request
 	handler.AppLogger.Http.Stream.Info().
 		Str("method", ctx.Method()).
 		Str("path", ctx.Path()).
