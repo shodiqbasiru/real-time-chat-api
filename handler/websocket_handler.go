@@ -2,568 +2,551 @@ package handler
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"real-time-chat-app/config/logger"
+	"real-time-chat-app/dto"
 	"real-time-chat-app/dto/req"
-	"real-time-chat-app/entity"
+	"real-time-chat-app/dto/res"
 	bcType "real-time-chat-app/enum/websocket_event"
+	"real-time-chat-app/mapper"
+	"real-time-chat-app/security"
 	"real-time-chat-app/usecase"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/gofiber/contrib/websocket"
-	"gorm.io/gorm"
 )
 
-type BroadcastMessage struct {
+const (
+	writeTimeout     = 10 * time.Second
+	maxMessageLength = 4000
+
+	// CloseUnauthorized is sent when the token is missing or invalid. Clients
+	// should sign in again instead of reconnecting.
+	CloseUnauthorized = 4401
+)
+
+var errClientClosed = errors.New("websocket client closed")
+
+// RealtimeNotifier lets REST handlers push events to connected clients.
+type RealtimeNotifier interface {
+	NotifyChatRead(ctx context.Context, chatID, readerID string)
+}
+
+// IncomingEvent is an event sent by a client.
+type IncomingEvent struct {
 	Type       bcType.BCEventType `json:"type"`
-	UserID     string             `json:"userId"`
 	ReceiverID string             `json:"receiverId"`
 	ChatID     string             `json:"chatId"`
 	MessageID  string             `json:"messageId"`
 	Content    string             `json:"content"`
 }
 
+// client is one WebSocket connection. A user can have several (tabs, devices,
+// a reload that overlaps with the old socket closing).
+type client struct {
+	userID string
+	conn   *websocket.Conn
+
+	// The underlying connection does not allow concurrent writers, and the
+	// connection object is recycled once the handler returns, so every write
+	// goes through this lock and stops once the client is closed.
+	mu     sync.Mutex
+	closed bool
+}
+
+func (c *client) send(v interface{}) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed {
+		return errClientClosed
+	}
+	_ = c.conn.SetWriteDeadline(time.Now().Add(writeTimeout))
+	return c.conn.WriteJSON(v)
+}
+
+func (c *client) closeWith(code int, reason string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed {
+		return
+	}
+	c.closed = true
+	_ = c.conn.SetWriteDeadline(time.Now().Add(writeTimeout))
+	_ = c.conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(code, reason))
+}
+
+func (c *client) markClosed() {
+	c.mu.Lock()
+	c.closed = true
+	c.mu.Unlock()
+}
+
 type WebSocketHandler struct {
-	DB        *gorm.DB
 	Log       *logger.AppLogger
+	JWT       *security.JWT
 	ChatUC    usecase.ChatUsecase
 	MessageUC usecase.MessageUsecase
 
-	Clients map[string]*websocket.Conn
-	Rooms   map[string]map[string]*websocket.Conn
-	Mutex   sync.RWMutex
+	mu      sync.RWMutex
+	clients map[string]map[*client]struct{} // userID -> connections
+
+	// presenceMu serialises presence broadcasts so observers always end up
+	// with the latest state, even when a user connects and disconnects at
+	// the same moment (e.g. a page reload).
+	presenceMu sync.Mutex
+	announced  map[string]bool
 }
 
-func NewWebSocketHandler(db *gorm.DB, logger *logger.AppLogger, chatUC usecase.ChatUsecase, messageUC usecase.MessageUsecase) *WebSocketHandler {
-	logger.WS.Info.Info().Msg("WebSocket handler initialized")
+func NewWebSocketHandler(log *logger.AppLogger, jwt *security.JWT, chatUC usecase.ChatUsecase, messageUC usecase.MessageUsecase) *WebSocketHandler {
+	log.WS.Info.Info().Msg("WebSocket handler initialized")
 	return &WebSocketHandler{
-		DB:        db,
-		Log:       logger,
+		Log:       log,
+		JWT:       jwt,
 		ChatUC:    chatUC,
 		MessageUC: messageUC,
-		Clients:   make(map[string]*websocket.Conn),
-		Rooms:     make(map[string]map[string]*websocket.Conn),
+		clients:   make(map[string]map[*client]struct{}),
+		announced: make(map[string]bool),
 	}
 }
 
-func (handler *WebSocketHandler) HandleWebSocket(conn *websocket.Conn) {
+// HandleWebSocket serves one connection. The client authenticates with the
+// same JWT it uses for REST calls: /ws?token=<jwt>.
+func (h *WebSocketHandler) HandleWebSocket(conn *websocket.Conn) {
 	ctx := context.Background()
-	userID := conn.Query("userId")
 
-	handler.Log.WS.Stream.Info().
-		Str("userId", userID).
-		Str("remoteAddr", conn.RemoteAddr().String()).
-		Msg("WebSocket connection attempt")
-
-	if userID == "" {
-		handler.Log.WS.Error.Error().Msg("WebSocket connection rejected: missing userId")
-		conn.WriteJSON(map[string]string{
-			"type":  string(bcType.ERROR),
-			"error": "userId required",
-		})
-		conn.Close()
+	userID, err := h.JWT.GetUserIdFromToken(conn.Query("token"))
+	if err != nil || userID == "" {
+		h.Log.WS.Warning.Warn().
+			Str("remoteAddr", conn.RemoteAddr().String()).
+			Msg("WebSocket connection rejected: invalid or missing token")
+		c := &client{conn: conn}
+		_ = c.send(map[string]string{"type": string(bcType.ERROR), "error": "unauthorized"})
+		c.closeWith(CloseUnauthorized, "unauthorized")
 		return
 	}
 
-	// Register client and set user online
-	handler.registerClient(userID, conn)
-
+	c := &client{userID: userID, conn: conn}
+	h.register(c)
 	defer func() {
-		handler.removeClient(userID)
-		handler.onDisConnect(userID)
-		conn.Close()
+		h.unregister(c)
+		h.announcePresence(userID)
+		h.Log.WS.Stream.Info().Str("userId", userID).Msg("WebSocket connection closed")
 	}()
 
-	// Send connection confirmation
-	conn.WriteJSON(map[string]string{
-		"type":   string(bcType.CONNECTED),
+	h.Log.WS.Stream.Info().
+		Str("userId", userID).
+		Str("remoteAddr", conn.RemoteAddr().String()).
+		Msg("WebSocket connection established")
+
+	_ = c.send(map[string]interface{}{
+		"type":   bcType.CONNECTED,
 		"userId": userID,
 	})
+	_ = c.send(map[string]interface{}{
+		"type":    bcType.ONLINE_USERS,
+		"userIds": h.onlineUserIDs(userID),
+	})
+	h.announcePresence(userID)
+	h.deliverPending(ctx, userID)
 
-	handler.onConnect(userID, conn)
-
-	handler.Log.WS.Stream.Info().Str("userId", userID).Msg("WebSocket connection established")
 	for {
-		var msg BroadcastMessage
-		if err := conn.ReadJSON(&msg); err != nil {
-			handler.Log.WS.Warning.Warn().Str("userId", userID).Err(err).Msg("User disconnected or read error")
-			break
+		_, data, err := conn.ReadMessage()
+		if err != nil {
+			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseNormalClosure, websocket.CloseNoStatusReceived) {
+				h.Log.WS.Warning.Warn().Str("userId", userID).Err(err).Msg("WebSocket read error")
+			}
+			return
 		}
 
-		handler.Log.WS.Stream.Info().
-			Str("userId", userID).
-			Str("messageType", string(msg.Type)).
-			Msg("Incoming WebSocket message")
-
-		if msg.Type == "" {
-			handler.sendError(conn, "message type is required")
+		var event IncomingEvent
+		if err := json.Unmarshal(data, &event); err != nil {
+			_ = c.sendError("invalid message format")
 			continue
 		}
 
-		switch msg.Type {
-		case bcType.CREATE_CHAT:
-			handler.handleCreateChat(ctx, conn, userID, msg)
+		h.Log.WS.Stream.Info().
+			Str("userId", userID).
+			Str("messageType", string(event.Type)).
+			Msg("Incoming WebSocket message")
 
-		case bcType.JOIN_ROOM:
-			handler.handleJoinRoom(ctx, conn, userID, msg)
-
-		case bcType.LEAVE_ROOM:
-			handler.handleLeaveRoom(userID, msg.ChatID)
-
-		case bcType.SEND_MESSAGE:
-			handler.handleSendMessage(ctx, userID, msg)
-
-		case bcType.MESSAGE_DELIVERED:
-			handler.handleMessageDelivered(userID, msg.MessageID, msg.ChatID)
-
-		case bcType.TYPING:
-			// handler.broadcastTyping(userID, msg.ChatID, true)
-
-		case bcType.STOP_TYPING:
-			// handler.broadcastTyping(userID, msg.ChatID, false)
-
-		default:
-			handler.Log.WS.Warning.Warn().Str("messageType", string(msg.Type)).Msg("Unknown message type")
-			handler.sendError(conn, "unknown message type: "+string(msg.Type))
-		}
+		h.dispatch(ctx, c, event)
 	}
 }
 
-func (handler *WebSocketHandler) handleCreateChat(ctx context.Context, c *websocket.Conn, senderID string, msg BroadcastMessage) {
-	if msg.ReceiverID == "" || msg.Content == "" {
-		handler.sendError(c, "receiverId and content required")
+func (h *WebSocketHandler) dispatch(ctx context.Context, c *client, event IncomingEvent) {
+	switch event.Type {
+	case "":
+		_ = c.sendError("message type is required")
+	case bcType.CREATE_CHAT:
+		h.handleCreateChat(ctx, c, event)
+	case bcType.SEND_MESSAGE:
+		h.handleSendMessage(ctx, c, event)
+	case bcType.JOIN_ROOM:
+		h.handleJoinRoom(ctx, c, event)
+	case bcType.LEAVE_ROOM:
+		// Messages are delivered to every participant, so there is no room
+		// state to leave. Kept so older clients do not get an error.
+	case bcType.MESSAGE_DELIVERED:
+		h.handleMessageDelivered(ctx, c, event)
+	case bcType.MESSAGE_READ:
+		h.handleMessageRead(ctx, c, event)
+	case bcType.TYPING:
+		h.handleTyping(ctx, c, event.ChatID, true)
+	case bcType.STOP_TYPING:
+		h.handleTyping(ctx, c, event.ChatID, false)
+	default:
+		_ = c.sendError("unknown message type: " + string(event.Type))
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Event handlers
+
+func (h *WebSocketHandler) handleCreateChat(ctx context.Context, c *client, event IncomingEvent) {
+	content := strings.TrimSpace(event.Content)
+	if event.ReceiverID == "" || content == "" {
+		_ = c.sendError("receiverId and content are required")
+		return
+	}
+	if len([]rune(content)) > maxMessageLength {
+		_ = c.sendError("message is too long")
 		return
 	}
 
-	createResponse, err := handler.ChatUC.CreatePersonalChat(ctx, senderID, msg.ReceiverID, msg.Content)
+	result, err := h.ChatUC.CreatePersonalChat(ctx, c.userID, event.ReceiverID, content)
 	if err != nil {
-		handler.sendError(c, err.Error())
+		h.Log.WS.Error.Error().Err(err).Str("userId", c.userID).Msg("Failed to create chat")
+		_ = c.sendError(publicError(err, "failed to create chat"))
 		return
 	}
 
-	handler.sendToUser(senderID, map[string]interface{}{
-		"type":         bcType.CHAT_CREATED,
-		"chatId":       createResponse.ChatId,
-		"chatUsername": createResponse.ChatUsername,
-		"chatAvatar":   createResponse.ChatAvatar,
-		"receiverId":   createResponse.ReceiverId,
-		"unreadCount":  createResponse.UnreadCount,
-	})
+	// Each side sees the chat named after the other person.
+	h.sendToUser(c.userID, chatCreatedEvent(
+		mapper.MapperCreateChatResponse(result.Chat, result.Receiver, result.Message), c.userID))
+	h.sendToUser(result.Receiver.ID, chatCreatedEvent(
+		mapper.MapperCreateChatResponse(result.Chat, result.Sender, result.Message), c.userID))
+
+	h.sendToUsers([]string{c.userID, result.Receiver.ID}, newMessageEvent(result.Message))
 }
 
-func (handler *WebSocketHandler) handleJoinRoom(ctx context.Context, c *websocket.Conn, userID string, msg BroadcastMessage) {
-	handler.Log.WS.Info.Info().
-		Str("userId", userID).
-		Str("chatId", msg.ChatID).
-		Str("receiverId", msg.ReceiverID).
-		Msg("Processing join_room")
-
-	if msg.ChatID == "" {
-		handler.sendError(c, "chatId is required")
+func (h *WebSocketHandler) handleSendMessage(ctx context.Context, c *client, event IncomingEvent) {
+	content := strings.TrimSpace(event.Content)
+	if event.ChatID == "" || content == "" {
+		_ = c.sendError("chatId and content are required")
+		return
+	}
+	if len([]rune(content)) > maxMessageLength {
+		_ = c.sendError("message is too long")
 		return
 	}
 
-	ok, err := handler.ChatUC.IsUserInChat(ctx, msg.ChatID, userID)
-	if err != nil || !ok {
-		handler.Log.WS.Error.Error().Err(err).Msg("Failed to join room")
-		handler.sendError(c, "failed to join room: "+err.Error())
+	participants, ok := h.participantsFor(ctx, c, event.ChatID)
+	if !ok {
 		return
 	}
 
-	handler.joinRoom(userID, msg.ChatID)
-	c.WriteJSON(map[string]interface{}{
+	message, err := h.MessageUC.ProcessIncomingMessage(ctx, req.MessageRequest{
+		ChatID:   event.ChatID,
+		SenderID: c.userID,
+		Content:  content,
+	})
+	if err != nil {
+		h.Log.WS.Error.Error().
+			Err(err).
+			Str("chatId", event.ChatID).
+			Str("senderId", c.userID).
+			Msg("Failed to process incoming message")
+		_ = c.sendError("failed to send message")
+		return
+	}
+
+	h.sendToUsers(participants, newMessageEvent(message))
+}
+
+// handleJoinRoom only checks membership: every participant receives a chat's
+// events without joining. Kept for clients that still send it.
+func (h *WebSocketHandler) handleJoinRoom(ctx context.Context, c *client, event IncomingEvent) {
+	if event.ChatID == "" {
+		_ = c.sendError("chatId is required")
+		return
+	}
+	if _, ok := h.participantsFor(ctx, c, event.ChatID); !ok {
+		return
+	}
+	_ = c.send(map[string]interface{}{
 		"type":   bcType.JOINED_ROOM,
-		"chatId": msg.ChatID,
+		"chatId": event.ChatID,
 	})
-
 }
 
-func (handler *WebSocketHandler) handleLeaveRoom(userID, chatID string) {
+func (h *WebSocketHandler) handleMessageDelivered(ctx context.Context, c *client, event IncomingEvent) {
+	if event.MessageID == "" {
+		return
+	}
+	receipt, err := h.MessageUC.MarkDelivered(ctx, event.MessageID, c.userID)
+	if err != nil {
+		h.Log.WS.Error.Error().Err(err).Str("messageId", event.MessageID).Msg("Failed to mark message as delivered")
+		return
+	}
+	if receipt != nil {
+		h.sendToUser(receipt.SenderID, deliveredEvent(*receipt, c.userID))
+	}
+}
+
+func (h *WebSocketHandler) handleMessageRead(ctx context.Context, c *client, event IncomingEvent) {
+	if event.ChatID == "" {
+		_ = c.sendError("chatId is required")
+		return
+	}
+	updated, err := h.MessageUC.MarkMessagesAsRead(ctx, event.ChatID, c.userID)
+	if err != nil {
+		_ = c.sendError(publicError(err, "failed to mark messages as read"))
+		return
+	}
+	if updated > 0 {
+		h.NotifyChatRead(ctx, event.ChatID, c.userID)
+	}
+}
+
+func (h *WebSocketHandler) handleTyping(ctx context.Context, c *client, chatID string, isTyping bool) {
 	if chatID == "" {
 		return
 	}
-	handler.Log.WS.Info.Info().Str("userId", userID).Str("chatId", chatID).Msg("Processing leave_room")
-	handler.leaveRoom(userID, chatID)
-}
-
-func (handler *WebSocketHandler) joinRoom(userID, chatID string) {
-	handler.Mutex.Lock()
-	defer handler.Mutex.Unlock()
-
-	if handler.Rooms[chatID] == nil {
-		handler.Rooms[chatID] = make(map[string]*websocket.Conn)
+	participants, err := h.ChatUC.GetParticipantIDs(ctx, chatID)
+	if err != nil || !contains(participants, c.userID) {
+		return
 	}
-	handler.Rooms[chatID][userID] = handler.Clients[userID]
+	h.sendToUsers(without(participants, c.userID), map[string]interface{}{
+		"type":     bcType.TYPING,
+		"chatId":   chatID,
+		"userId":   c.userID,
+		"isTyping": isTyping,
+	})
 }
 
-func (handler *WebSocketHandler) leaveRoom(userID, chatID string) {
-	handler.Mutex.Lock()
-	defer handler.Mutex.Unlock()
+// NotifyChatRead tells the other participants that readerID has read
+// everything in the chat.
+func (h *WebSocketHandler) NotifyChatRead(ctx context.Context, chatID, readerID string) {
+	participants, err := h.ChatUC.GetParticipantIDs(ctx, chatID)
+	if err != nil {
+		h.Log.WS.Error.Error().Err(err).Str("chatId", chatID).Msg("Failed to load participants for read receipt")
+		return
+	}
+	h.sendToUsers(without(participants, readerID), map[string]interface{}{
+		"type":   bcType.MESSAGE_READ,
+		"chatId": chatID,
+		"userId": readerID,
+	})
+}
 
-	if room, ok := handler.Rooms[chatID]; ok {
-		delete(room, userID)
-		handler.Log.WS.Info.Info().Str("userId", userID).Str("chatId", chatID).Msg("User left chat room")
+// deliverPending marks messages that arrived while the user was offline as
+// delivered and lets their senders know.
+func (h *WebSocketHandler) deliverPending(ctx context.Context, userID string) {
+	receipts, err := h.MessageUC.MarkPendingDelivered(ctx, userID)
+	if err != nil {
+		return
+	}
+	for _, r := range receipts {
+		h.sendToUser(r.SenderID, deliveredEvent(r, userID))
+	}
+}
 
-		if len(room) == 0 {
-			delete(handler.Rooms, chatID)
+// participantsFor returns the chat's participants, or reports an error to
+// the client and returns false when the user is not one of them.
+func (h *WebSocketHandler) participantsFor(ctx context.Context, c *client, chatID string) ([]string, bool) {
+	participants, err := h.ChatUC.GetParticipantIDs(ctx, chatID)
+	if err != nil {
+		h.Log.WS.Error.Error().Err(err).Str("chatId", chatID).Msg("Failed to load chat participants")
+		_ = c.sendError("something went wrong, please try again")
+		return nil, false
+	}
+	if contains(participants, c.userID) {
+		return participants, true
+	}
+	_ = c.sendError(usecase.ErrNotParticipant.Error())
+	return nil, false
+}
+
+// ---------------------------------------------------------------------------
+// Connections and presence
+
+func (h *WebSocketHandler) register(c *client) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.clients[c.userID] == nil {
+		h.clients[c.userID] = make(map[*client]struct{})
+	}
+	h.clients[c.userID][c] = struct{}{}
+	h.Log.WS.Info.Info().
+		Str("userId", c.userID).
+		Int("connections", len(h.clients[c.userID])).
+		Msg("Client registered")
+}
+
+func (h *WebSocketHandler) unregister(c *client) {
+	c.markClosed()
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if conns, ok := h.clients[c.userID]; ok {
+		delete(conns, c)
+		if len(conns) == 0 {
+			delete(h.clients, c.userID)
 		}
 	}
 }
 
-func (handler *WebSocketHandler) handleSendMessage(ctx context.Context, senderID string, msg BroadcastMessage) {
-	if msg.ChatID == "" || msg.Content == "" {
-		handler.sendErrorToUser(senderID, "chatId and content are required")
-		return
-	}
-
-	handler.Mutex.RLock()
-	room, exists := handler.Rooms[msg.ChatID]
-	_, joined := room[senderID]
-	handler.Mutex.RUnlock()
-
-	if !exists || !joined {
-		handler.sendErrorToUser(senderID, "join room first")
-		return
-	}
-
-	broadcast, err := handler.MessageUC.ProcessIncomingMessage(ctx,
-		req.MessageRequest{
-			ChatID:   msg.ChatID,
-			SenderID: senderID,
-			Content:  msg.Content,
-		},
-	)
-
-	if err != nil {
-		handler.Log.WS.Error.Error().
-			Err(err).
-			Str("chatId", msg.ChatID).
-			Str("senderId", senderID).
-			Msg("failed to process incoming message")
-
-		handler.sendErrorToUser(senderID, "failed to send message")
-		return
-	}
-
-	handler.broadcastToRoom(msg.ChatID, map[string]interface{}{
-		"type":         "new_message",
-		"chatId":       broadcast.ChatID,
-		"messageId":    broadcast.MessageID,
-		"senderId":     broadcast.SenderID,
-		"senderName":   broadcast.SenderName,
-		"senderAvatar": broadcast.SenderAvatar,
-		"content":      broadcast.Content,
-		"status":       broadcast.Status,
-		"createdAt":    broadcast.CreatedAt,
-	})
+func (h *WebSocketHandler) isOnline(userID string) bool {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return len(h.clients[userID]) > 0
 }
 
-func (handler *WebSocketHandler) onConnect(userId string, conn *websocket.Conn) {
-	handler.Mutex.RLock()
-	defer handler.Mutex.RUnlock()
-	handler.Clients[userId] = conn
-
-	handler.broadcastUserStatus(userId, true)
+func (h *WebSocketHandler) onlineUserIDs(exclude string) []string {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	ids := make([]string, 0, len(h.clients))
+	for id := range h.clients {
+		if id != exclude {
+			ids = append(ids, id)
+		}
+	}
+	return ids
 }
 
-func (handler *WebSocketHandler) onDisConnect(userId string) {
-	handler.Mutex.RLock()
-	defer handler.Mutex.RUnlock()
-	delete(handler.Clients, userId)
+// announcePresence broadcasts the user's current online state if it changed
+// since the last announcement.
+func (h *WebSocketHandler) announcePresence(userID string) {
+	h.presenceMu.Lock()
+	defer h.presenceMu.Unlock()
 
-	handler.broadcastUserStatus(userId, false)
-}
+	online := h.isOnline(userID)
+	if h.announced[userID] == online {
+		return
+	}
+	if online {
+		h.announced[userID] = true
+	} else {
+		delete(h.announced, userID)
+	}
 
-func (handler *WebSocketHandler) broadcastUserStatus(userID string, isOnline bool) {
-	statusMsg := map[string]interface{}{
+	event := map[string]interface{}{
 		"type":     bcType.USER_STATUS,
 		"userId":   userID,
-		"isOnline": isOnline,
+		"isOnline": online,
 	}
+	for _, c := range h.snapshot(func(id string) bool { return id != userID }) {
+		_ = c.send(event)
+	}
+	h.Log.WS.Info.Info().Str("userId", userID).Bool("isOnline", online).Msg("User status broadcasted")
+}
 
-	for uid, conn := range handler.Clients {
-		if uid != userID {
-			conn.WriteJSON(statusMsg)
+// snapshot copies the matching connections so writes happen without holding
+// the map lock.
+func (h *WebSocketHandler) snapshot(match func(userID string) bool) []*client {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	var out []*client
+	for id, conns := range h.clients {
+		if !match(id) {
+			continue
+		}
+		for c := range conns {
+			out = append(out, c)
 		}
 	}
-
-	handler.Log.WS.Info.Info().
-		Str("userId", userID).
-		Bool("isOnline", isOnline).
-		Int("broadcastCount", len(handler.Clients)-1).
-		Msg("User status broadcasted")
+	return out
 }
 
-func (handler *WebSocketHandler) notifyNewChatToReceiver(ctx context.Context, chatId, senderId, receiverId, firstMessage string) {
-
+func (h *WebSocketHandler) sendToUser(userID string, event interface{}) {
+	h.sendToUsers([]string{userID}, event)
 }
 
-func (handler *WebSocketHandler) sendToUser(userID string, message interface{}) {
-	handler.Mutex.RLock()
-	conn, exists := handler.Clients[userID]
-	handler.Mutex.RUnlock()
-
-	if !exists {
-		return
+func (h *WebSocketHandler) sendToUsers(userIDs []string, event interface{}) {
+	wanted := make(map[string]struct{}, len(userIDs))
+	for _, id := range userIDs {
+		wanted[id] = struct{}{}
 	}
-
-	if err := conn.WriteJSON(message); err != nil {
-		handler.Log.WS.Error.Error().Err(err).Str("userId", userID).Msg("Failed to send to user")
-	}
-}
-
-// NEW: Auto mark message as delivered for online users in room
-func (handler *WebSocketHandler) autoMarkAsDelivered(chatID, messageID, senderID string) {
-	handler.Mutex.RLock()
-	room, exists := handler.Rooms[chatID]
-	handler.Mutex.RUnlock()
-
-	if !exists {
-		return
-	}
-
-	now := time.Now()
-	for userID := range room {
-		if userID != senderID {
-			// Update message status to delivered
-			err := handler.DB.Model(&entity.MessageStatus{}).
-				Where("message_id = ? AND user_id = ?", messageID, userID).
-				Updates(map[string]interface{}{
-					"is_delivered": true,
-					"delivered_at": now,
-				}).Error
-
-			if err != nil {
-				handler.Log.WS.Error.Error().Err(err).Msg("Failed to mark as delivered")
-				continue
-			}
-
-			// Send delivered acknowledgment to sender
-			handler.sendToUser(senderID, map[string]interface{}{
-				"type":      "message_delivered",
-				"messageId": messageID,
-				"chatId":    chatID,
-				"userId":    userID,
-			})
-		}
-	}
-
-	// Check if all recipients have received the message
-	handler.updateMessageStatusIfAll(messageID, "delivered")
-}
-
-// NEW: Mark messages as delivered when user joins room
-func (handler *WebSocketHandler) markMessagesAsDelivered(chatID, userID string) {
-	var undeliveredMessages []entity.Messages
-	err := handler.DB.Where("chat_id = ? AND sender_id != ?", chatID, userID).
-		Find(&undeliveredMessages).Error
-
-	if err != nil {
-		return
-	}
-
-	now := time.Now()
-	for _, msg := range undeliveredMessages {
-		// Update message status
-		handler.DB.Model(&entity.MessageStatus{}).
-			Where("message_id = ? AND user_id = ? AND is_delivered = false", msg.ID, userID).
-			Updates(map[string]interface{}{
-				"is_delivered": true,
-				"delivered_at": now,
-			})
-
-		// Notify sender
-		handler.sendToUser(msg.SenderId, map[string]interface{}{
-			"type":      "message_delivered",
-			"messageId": msg.ID,
-			"chatId":    chatID,
-			"userId":    userID,
-		})
-
-		// Update main message status if all delivered
-		handler.updateMessageStatusIfAll(msg.ID, "delivered")
-	}
-}
-
-// NEW: Handle message delivered acknowledgment
-func (handler *WebSocketHandler) handleMessageDelivered(userID, messageID, chatID string) {
-	if messageID == "" {
-		return
-	}
-
-	now := time.Now()
-	err := handler.DB.Model(&entity.MessageStatus{}).
-		Where("message_id = ? AND user_id = ?", messageID, userID).
-		Updates(map[string]interface{}{
-			"is_delivered": true,
-			"delivered_at": now,
-		}).Error
-
-	if err != nil {
-		handler.Log.WS.Error.Error().Err(err).Msg("Failed to update delivered status")
-		return
-	}
-
-	// Get sender ID
-	var message entity.Messages
-	if err := handler.DB.Where("id = ?", messageID).First(&message).Error; err != nil {
-		return
-	}
-
-	// Notify sender
-	handler.sendToUser(message.SenderId, map[string]interface{}{
-		"type":      "message_delivered",
-		"messageId": messageID,
-		"chatId":    chatID,
-		"userId":    userID,
-	})
-
-	handler.updateMessageStatusIfAll(messageID, "delivered")
-}
-
-// NEW: Handle message read acknowledgment
-func (handler *WebSocketHandler) handleMessageRead(userID, messageID, chatID string) {
-	if messageID == "" {
-		return
-	}
-
-	now := time.Now()
-	err := handler.DB.Model(&entity.MessageStatus{}).
-		Where("message_id = ? AND user_id = ?", messageID, userID).
-		Updates(map[string]interface{}{
-			"is_delivered": true,
-			"delivered_at": now,
-			"is_read":      true,
-			"read_at":      now,
-		}).Error
-
-	if err != nil {
-		handler.Log.WS.Error.Error().Err(err).Msg("Failed to update read status")
-		return
-	}
-
-	// Get sender ID
-	var message entity.Messages
-	if err := handler.DB.Where("id = ?", messageID).First(&message).Error; err != nil {
-		return
-	}
-
-	// Notify sender
-	handler.sendToUser(message.SenderId, map[string]interface{}{
-		"type":      "message_read",
-		"messageId": messageID,
-		"chatId":    chatID,
-		"userId":    userID,
-	})
-
-	handler.updateMessageStatusIfAll(messageID, "read")
-}
-
-// NEW: Update message status if all recipients have same status
-func (handler *WebSocketHandler) updateMessageStatusIfAll(messageID string, status string) {
-	var total, count int64
-	handler.DB.Model(&entity.MessageStatus{}).Where("message_id = ?", messageID).Count(&total)
-
-	if status == "delivered" {
-		handler.DB.Model(&entity.MessageStatus{}).
-			Where("message_id = ? AND is_delivered = true", messageID).Count(&count)
-	} else if status == "read" {
-		handler.DB.Model(&entity.MessageStatus{}).
-			Where("message_id = ? AND is_read = true", messageID).Count(&count)
-	}
-
-	if total > 0 && count == total {
-		now := time.Now()
-		updates := map[string]interface{}{"status": status}
-
-		if status == "delivered" {
-			updates["delivered_at"] = now
-		} else if status == "read" {
-			updates["read_at"] = now
-		}
-
-		handler.DB.Model(&entity.Messages{}).Where("id = ?", messageID).Updates(updates)
-	}
-}
-
-func (handler *WebSocketHandler) broadcastToRoom(chatID string, message interface{}) {
-	handler.Mutex.RLock()
-	room, exists := handler.Rooms[chatID]
-	handler.Mutex.RUnlock()
-
-	if !exists {
-		return
-	}
-
-	for userID, conn := range room {
-		if err := conn.WriteJSON(message); err != nil {
-			handler.Log.WS.Error.Error().Err(err).Str("userId", userID).Msg("Failed to send message")
+	for _, c := range h.snapshot(func(id string) bool { _, ok := wanted[id]; return ok }) {
+		if err := c.send(event); err != nil && !errors.Is(err, errClientClosed) {
+			h.Log.WS.Error.Error().Err(err).Str("userId", c.userID).Msg("Failed to send event")
 		}
 	}
 }
 
-func (handler *WebSocketHandler) sendErrorToUser(userID, errorMsg string) {
-	handler.Mutex.RLock()
-	conn, exists := handler.Clients[userID]
-	handler.Mutex.RUnlock()
+func (c *client) sendError(message string) error {
+	return c.send(map[string]string{"type": string(bcType.ERROR), "error": message})
+}
 
-	if exists {
-		conn.WriteJSON(map[string]string{"type": "error", "error": errorMsg})
+// ---------------------------------------------------------------------------
+// Payloads
+
+func newMessageEvent(m dto.BroadcastMessage) map[string]interface{} {
+	return map[string]interface{}{
+		"type":         bcType.NEW_MESSAGE,
+		"chatId":       m.ChatID,
+		"messageId":    m.MessageID,
+		"senderId":     m.SenderID,
+		"senderName":   m.SenderName,
+		"senderAvatar": m.SenderAvatar,
+		"content":      m.Content,
+		"status":       m.Status,
+		"createdAt":    m.CreatedAt,
 	}
 }
 
-func (handler *WebSocketHandler) sendError(c *websocket.Conn, errorMsg string) {
-	c.WriteJSON(map[string]string{"type": "error", "error": errorMsg})
+func chatCreatedEvent(chat *res.CreateChatResponse, initiatorID string) map[string]interface{} {
+	return map[string]interface{}{
+		"type":            bcType.CHAT_CREATED,
+		"chatId":          chat.ChatId,
+		"receiverId":      chat.ReceiverId,
+		"chatUsername":    chat.ChatUsername,
+		"chatAvatar":      chat.ChatAvatar,
+		"chatType":        chat.ChatType,
+		"lastMessage":     chat.LastMessage,
+		"lastMessageTime": chat.LastMessageTime,
+		"unreadCount":     chat.UnreadCount,
+		"initiatorId":     initiatorID,
+	}
 }
 
-func (handler *WebSocketHandler) registerClient(userID string, conn *websocket.Conn) {
-	handler.Mutex.Lock()
-	defer handler.Mutex.Unlock()
-	handler.Clients[userID] = conn
-	handler.Log.WS.Info.Info().Str("userId", userID).Int("totalClients", len(handler.Clients)).Msg("User registered")
+func deliveredEvent(r usecase.DeliveryReceipt, recipientID string) map[string]interface{} {
+	return map[string]interface{}{
+		"type":      bcType.MESSAGE_DELIVERED,
+		"messageId": r.MessageID,
+		"chatId":    r.ChatID,
+		"userId":    recipientID,
+	}
 }
 
-func (handler *WebSocketHandler) removeClient(userID string) {
-	handler.Mutex.Lock()
-	defer handler.Mutex.Unlock()
-
-	delete(handler.Clients, userID)
-
-	for chatID, room := range handler.Rooms {
-		if _, exists := room[userID]; exists {
-			delete(room, userID)
-			if len(room) == 0 {
-				delete(handler.Rooms, chatID)
-			}
+// publicError returns err's message when it is meant for clients, otherwise
+// the fallback, so database errors never leak to the browser.
+func publicError(err error, fallback string) string {
+	for _, known := range []error{usecase.ErrSelfChat, usecase.ErrUserNotFound, usecase.ErrNotParticipant} {
+		if errors.Is(err, known) {
+			return known.Error()
 		}
 	}
-
-	handler.Log.WS.Info.Info().Str("userId", userID).Msg("User disconnected and cleaned up")
+	return fallback
 }
 
-func (handler *WebSocketHandler) handleTyping(userID, chatID string, isTyping bool) {
-	if chatID == "" {
-		return
-	}
-
-	handler.Mutex.RLock()
-	room, exists := handler.Rooms[chatID]
-	handler.Mutex.RUnlock()
-
-	if !exists {
-		return
-	}
-
-	typingMsg := map[string]interface{}{
-		"type":     "typing",
-		"chatId":   chatID,
-		"userId":   userID,
-		"isTyping": isTyping,
-	}
-
-	for uid, conn := range room {
-		if uid != userID {
-			conn.WriteJSON(typingMsg)
+func without(ids []string, exclude string) []string {
+	out := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if id != exclude {
+			out = append(out, id)
 		}
 	}
+	return out
+}
+
+func contains(ids []string, id string) bool {
+	for _, v := range ids {
+		if v == id {
+			return true
+		}
+	}
+	return false
 }

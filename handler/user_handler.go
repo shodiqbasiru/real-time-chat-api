@@ -1,8 +1,10 @@
 package handler
 
 import (
+	"errors"
 	"github.com/gofiber/fiber/v2"
 	"real-time-chat-app/config/logger"
+	"real-time-chat-app/dto/req"
 	"real-time-chat-app/dto/res"
 	"real-time-chat-app/usecase"
 )
@@ -154,6 +156,51 @@ func (handler *UserHandler) GetUser(ctx *fiber.Ctx) error {
 	return ctx.Status(fiber.StatusOK).JSON(response)
 }
 
+// EditUser updates the signed-in user's name and phone number.
 func (handler *UserHandler) EditUser(ctx *fiber.Ctx) error {
-	panic("")
+	handler.Log.Http.Stream.Info().
+		Str("method", ctx.Method()).
+		Str("path", ctx.Path()).
+		Str("ip", ctx.IP()).
+		Msg("Incoming request: Edit profile")
+
+	var request req.EditProfileRequest
+	if err := ctx.BodyParser(&request); err != nil {
+		return ctx.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error": "invalid request body",
+		})
+	}
+
+	token := ctx.Get("Authorization")[7:]
+	userResponse, err := handler.UserUsecase.UpdateProfile(ctx.Context(), token, &request)
+	if err != nil {
+		status := fiber.StatusInternalServerError
+		message := "failed to update profile"
+		switch {
+		case errors.Is(err, usecase.ErrInvalidProfile):
+			status, message = fiber.StatusBadRequest, err.Error()
+		case errors.Is(err, usecase.ErrPhoneTaken):
+			status, message = fiber.StatusConflict, err.Error()
+		case errors.Is(err, usecase.ErrUserNotFound):
+			status, message = fiber.StatusNotFound, err.Error()
+		}
+
+		handler.Log.Http.Stream.Error().
+			Err(err).
+			Int("statusCode", status).
+			Msg("Response: Failed to update profile")
+
+		return ctx.Status(status).JSON(fiber.Map{"error": message})
+	}
+
+	handler.Log.Http.Stream.Info().
+		Int("statusCode", fiber.StatusOK).
+		Str("userId", userResponse.ID).
+		Msg("Response: Profile updated")
+
+	return ctx.Status(fiber.StatusOK).JSON(res.CommonResponse[res.UserResponse]{
+		Message:    "Successfully To Update Profile",
+		StatusCode: fiber.StatusOK,
+		Data:       userResponse,
+	})
 }

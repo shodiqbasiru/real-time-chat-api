@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"errors"
 	"github.com/gofiber/fiber/v2"
 	"real-time-chat-app/config/logger"
 	"real-time-chat-app/dto/res"
@@ -11,12 +12,13 @@ import (
 type ChatHandler struct {
 	usecase.ChatUsecase
 	usecase.MessageUsecase
-	Log *logger.AppLogger
+	Realtime RealtimeNotifier
+	Log      *logger.AppLogger
 	*security.JWT
 }
 
-func NewChatHandler(chatUsecase usecase.ChatUsecase, messageUsecase usecase.MessageUsecase, logger *logger.AppLogger, JWT *security.JWT) *ChatHandler {
-	return &ChatHandler{ChatUsecase: chatUsecase, MessageUsecase: messageUsecase, Log: logger, JWT: JWT}
+func NewChatHandler(chatUsecase usecase.ChatUsecase, messageUsecase usecase.MessageUsecase, realtime RealtimeNotifier, logger *logger.AppLogger, JWT *security.JWT) *ChatHandler {
+	return &ChatHandler{ChatUsecase: chatUsecase, MessageUsecase: messageUsecase, Realtime: realtime, Log: logger, JWT: JWT}
 }
 
 func (handler *ChatHandler) GetAllChat(c *fiber.Ctx) error {
@@ -169,7 +171,12 @@ func (handler *ChatHandler) MarkMessagesAsRead(c *fiber.Ctx) error {
 		Msg("Processing mark messages as read")
 
 	ctx := c.Context()
-	err = handler.MessageUsecase.MarkMessagesAsRead(ctx, chatId, userID)
+	updated, err := handler.MessageUsecase.MarkMessagesAsRead(ctx, chatId, userID)
+	if errors.Is(err, usecase.ErrNotParticipant) {
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{
+			"error": err.Error(),
+		})
+	}
 	if err != nil {
 		handler.Log.Http.Error.Error().
 			Err(err).
@@ -188,9 +195,14 @@ func (handler *ChatHandler) MarkMessagesAsRead(c *fiber.Ctx) error {
 		})
 	}
 
+	if updated > 0 && handler.Realtime != nil {
+		handler.Realtime.NotifyChatRead(ctx, chatId, userID)
+	}
+
 	handler.Log.Http.Info.Info().
 		Str("chatId", chatId).
 		Str("userId", userID).
+		Int64("updatedCount", updated).
 		Msg("Messages marked as read successfully")
 
 	handler.Log.Http.Stream.Info().

@@ -6,14 +6,17 @@ import (
 	"real-time-chat-app/entity"
 )
 
-func MapperCreateChatResponse(chat entity.Chat, receiver entity.User, BCMessage dto.BroadcastMessage) *res.CreateChatResponse {
+// MapperCreateChatResponse describes a private chat from the point of view of
+// the user who is NOT `other`: `other` is the person they are chatting with.
+func MapperCreateChatResponse(chat entity.Chat, other entity.User, BCMessage dto.BroadcastMessage) *res.CreateChatResponse {
 	return &res.CreateChatResponse{
-		ChatId:       chat.ID,
-		ReceiverId:   receiver.ID,
-		ChatUsername: receiver.Name,
-		ChatAvatar:   receiver.Avatar,
-		ChatType:     "PRIVATE",
-		LastMessage:  BCMessage.Content,
-		UnreadCount:  0,
+		ChatId:          chat.ID,
+		ReceiverId:      other.ID,
+		ChatUsername:    other.Name,
+		ChatAvatar:      other.Avatar,
+		ChatType:        string(chat.ChatType),
+		LastMessage:     BCMessage.Content,
+		LastMessageTime: BCMessage.CreatedAt,
+		UnreadCount:     0,
 	}
 }

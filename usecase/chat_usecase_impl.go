@@ -9,9 +9,9 @@ import (
 	"real-time-chat-app/dto/res"
 	"real-time-chat-app/entity"
 	"real-time-chat-app/enum"
-	"real-time-chat-app/mapper"
 	"real-time-chat-app/repository"
 	"real-time-chat-app/security"
+	"time"
 
 	"gorm.io/gorm"
 )
@@ -29,89 +29,99 @@ func NewChatUsecase(chatRepository *repository.ChatRepository, messageUC Message
 	return &ChatUsecaseImpl{ChatRepository: chatRepository, MessageUsecase: messageUC, UserUsecase: userUC, Log: logger, DB: DB, JWT: JWT}
 }
 
-func (uc *ChatUsecaseImpl) CreatePersonalChat(ctx context.Context, userAID, userBID, content string) (*res.CreateChatResponse, error) {
+// CreatePersonalChat sends the first message of a private chat, creating the
+// chat when the two users do not have one yet and reusing it otherwise.
+func (uc *ChatUsecaseImpl) CreatePersonalChat(ctx context.Context, senderID, receiverID, content string) (*PersonalChatResult, error) {
 	uc.Log.Http.Info.Info().
-		Str("chatId", content).
-		Str("userAID", userAID).
-		Str("userBID", userBID).
+		Str("senderId", senderID).
+		Str("receiverId", receiverID).
 		Msg("CreatePersonalChat started")
 
-	uc.Log.Http.Trace.Trace().
-		Str("chatId", content).
-		Str("userAID", userAID).
-		Str("userBID", userBID).
-		Msg("Checking for existing personal chat")
+	if senderID == receiverID {
+		return nil, ErrSelfChat
+	}
 
-	existingChat, err := uc.ChatRepository.FindPersonalChat(ctx, uc.DB, userAID, userBID)
-	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+	sender, err := uc.UserUsecase.FindUser(ctx, senderID)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrUserNotFound
+		}
+		return nil, err
+	}
+	receiver, err := uc.UserUsecase.FindUser(ctx, receiverID)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrUserNotFound
+		}
+		return nil, err
+	}
+
+	chat, err := uc.ChatRepository.FindPersonalChat(ctx, uc.DB, senderID, receiverID)
+	if err != nil {
 		uc.Log.Http.Error.Error().
 			Err(err).
-			Str("userAID", userAID).
-			Str("userBID", userBID).
+			Str("senderId", senderID).
+			Str("receiverId", receiverID).
 			Msg("Failed to check for existing personal chat")
 		return nil, err
 	}
 
-	if existingChat != nil {
+	created := false
+	if chat == nil {
+		chat = &entity.Chat{ChatType: enum.PRIVATE}
+		participants := []entity.ChatParticipant{
+			{UserID: senderID},
+			{UserID: receiverID},
+		}
+		if err := uc.ChatRepository.CreateChatWithParticipants(ctx, uc.DB, chat, participants); err != nil {
+			uc.Log.Http.Error.Error().
+				Err(err).
+				Str("senderId", senderID).
+				Str("receiverId", receiverID).
+				Msg("Failed to create personal chat")
+			return nil, err
+		}
+		created = true
+	} else {
 		uc.Log.Http.Info.Info().
-			Str("chatId", existingChat.ID).
-			Str("userAID", userAID).
-			Str("userBID", userBID).
-			Msg("Personal chat already exists")
-		return nil, nil
+			Str("chatId", chat.ID).
+			Msg("Personal chat already exists, reusing it")
 	}
 
-	uc.Log.Http.Trace.Trace().
-		Str("userAID", userAID).
-		Str("userBID", userBID).
-		Msg("Creating new personal chat")
-
-	newChat := &entity.Chat{
-		ChatType: enum.PRIVATE,
-	}
-
-	participants := []entity.ChatParticipant{
-		{UserID: userAID},
-		{UserID: userBID},
-	}
-
-	if err := uc.ChatRepository.CreateChatWithParticipants(ctx, uc.DB, newChat, participants); err != nil {
-		uc.Log.Http.Error.Error().
-			Err(err).
-			Str("userAID", userAID).
-			Str("userBID", userBID).
-			Msg("Failed to create personal chat")
-		return nil, err
-	}
-
-	newMessage := req.MessageRequest{
-		ChatID:     newChat.ID,
-		SenderID:   userAID,
-		ReceiverID: userBID,
+	message, err := uc.MessageUsecase.ProcessIncomingMessage(ctx, req.MessageRequest{
+		ChatID:     chat.ID,
+		SenderID:   senderID,
+		ReceiverID: receiverID,
 		Content:    content,
-	}
-
-	BCMessage, err := uc.MessageUsecase.ProcessIncomingMessage(ctx, newMessage)
+	})
 	if err != nil {
 		uc.Log.Http.Error.Error().
 			Err(err).
-			Msg("Failed to create newChat")
+			Str("chatId", chat.ID).
+			Msg("Failed to save first message")
 		return nil, fmt.Errorf("failed to create message: %w", err)
 	}
 
-	receiver, _ := uc.UserUsecase.FindUser(ctx, userBID)
-
 	uc.Log.Http.Info.Info().
-		Str("chatId", newChat.ID).
-		Str("userAID", userAID).
-		Str("userBID", userBID).
-		Msg("Personal chat created successfully")
+		Str("chatId", chat.ID).
+		Bool("created", created).
+		Msg("Personal chat ready")
 
-	return mapper.MapperCreateChatResponse(*newChat, *receiver, BCMessage), err
+	return &PersonalChatResult{
+		Chat:     *chat,
+		Created:  created,
+		Sender:   *sender,
+		Receiver: *receiver,
+		Message:  message,
+	}, nil
 }
 
 func (uc *ChatUsecaseImpl) IsUserInChat(ctx context.Context, chatID, userID string) (bool, error) {
 	return uc.ChatRepository.IsUserInChat(ctx, uc.DB, chatID, userID)
+}
+
+func (uc *ChatUsecaseImpl) GetParticipantIDs(ctx context.Context, chatID string) ([]string, error) {
+	return uc.ChatRepository.FindParticipantIDs(ctx, uc.DB, chatID)
 }
 
 func (uc *ChatUsecaseImpl) CreateGroupChat(ctx context.Context, name string, creatorID string, memberIDs []string) (*entity.Chat, error) {
@@ -266,7 +276,7 @@ func (uc *ChatUsecaseImpl) GetChatsByUser(ctx context.Context, token string) ([]
 			Order("created_at DESC").
 			First(&lastMessage).Error; err == nil {
 			lastMessageContent = lastMessage.Content
-			lastMessageTime = lastMessage.CreatedAt.Format("2006-01-02 15:04:05")
+			lastMessageTime = lastMessage.CreatedAt.Format(time.RFC3339)
 		} else if !errors.Is(err, gorm.ErrRecordNotFound) {
 			uc.Log.Http.Trace.Trace().
 				Str("chatId", chat.ID).
@@ -355,7 +365,7 @@ func (uc *ChatUsecaseImpl) GetMessagesByChatID(ctx context.Context, token string
 			SenderId:   msg.SenderId,
 			SenderName: msg.Sender.Name,
 			Status:     string(msg.Status),
-			CreatedAt:  msg.CreatedAt.Format("2006-01-02 15:04:05"),
+			CreatedAt:  msg.CreatedAt.Format(time.RFC3339),
 		})
 	}
 

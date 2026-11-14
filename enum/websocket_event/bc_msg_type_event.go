@@ -21,6 +21,7 @@ const (
 
 	// status
 	USER_STATUS       BCEventType = "user_status"
+	ONLINE_USERS      BCEventType = "online_users"
 	MESSAGE_DELIVERED BCEventType = "message_delivered"
 	MESSAGE_READ      BCEventType = "message_read"
 

@@ -3,8 +3,10 @@ package repository
 import (
 	"context"
 	"errors"
-	"gorm.io/gorm"
 	"real-time-chat-app/entity"
+	"real-time-chat-app/enum"
+
+	"gorm.io/gorm"
 )
 
 type ChatRepository struct {
@@ -15,19 +17,26 @@ func NewChatRepository() *ChatRepository {
 	return &ChatRepository{}
 }
 
+// FindPersonalChat returns the private chat between two users, or nil when
+// they have none. If duplicates exist from older versions, the oldest wins so
+// every caller agrees on the same chat.
 func (repository ChatRepository) FindPersonalChat(ctx context.Context, db *gorm.DB, userAID, userBID string) (*entity.Chat, error) {
 	var chat entity.Chat
 	err := db.WithContext(ctx).
-		Joins("JOIN t_chat_participant cp1 ON cp1.chat_id = t_chat.id").
-		Joins("JOIN t_chat_participant cp2 ON cp2.chat_id = t_chat.id").
-		Where("cp1.user_id = ? AND cp2.user_id = ? AND t_chat.chat_type = ?", userAID, userBID, "personal").
+		Joins("JOIN t_chat_participant cp1 ON cp1.chat_id = t_chat.id AND cp1.user_id = ?", userAID).
+		Joins("JOIN t_chat_participant cp2 ON cp2.chat_id = t_chat.id AND cp2.user_id = ?", userBID).
+		Where("t_chat.chat_type = ?", enum.PRIVATE).
+		Order("t_chat.created_at ASC").
 		First(&chat).Error
 
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, nil
 	}
+	if err != nil {
+		return nil, err
+	}
 
-	return &chat, err
+	return &chat, nil
 }
 
 func (repository ChatRepository) FindChatByID(ctx context.Context, db *gorm.DB, id string) (*entity.Chat, error) {
@@ -93,4 +102,14 @@ func (repository ChatRepository) FindMessagesByChatID(ctx context.Context, db *g
 		Order("created_at ASC").
 		Find(&messages).Error
 	return messages, err
+}
+
+// FindParticipantIDs returns the user IDs of everyone in a chat.
+func (repository ChatRepository) FindParticipantIDs(ctx context.Context, db *gorm.DB, chatID string) ([]string, error) {
+	var ids []string
+	err := db.WithContext(ctx).
+		Model(&entity.ChatParticipant{}).
+		Where("chat_id = ?", chatID).
+		Pluck("user_id", &ids).Error
+	return ids, err
 }

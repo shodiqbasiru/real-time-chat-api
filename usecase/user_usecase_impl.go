@@ -4,10 +4,13 @@ import (
 	"context"
 	"errors"
 	"real-time-chat-app/config/logger"
+	"real-time-chat-app/dto/req"
 	"real-time-chat-app/dto/res"
 	"real-time-chat-app/entity"
 	"real-time-chat-app/repository"
 	"real-time-chat-app/security"
+	"strings"
+	"time"
 
 	"github.com/go-playground/validator/v10"
 	"gorm.io/gorm"
@@ -74,7 +77,7 @@ func (uc *UserUsecaseImpl) GetAllUser(ctx context.Context) ([]res.UserResponse, 
 			Name:        user.Name,
 			Email:       user.Email,
 			PhoneNumber: user.PhoneNumber,
-			CreatedAt:   user.CreatedAt.Format("2006-01-02 15:04:05"),
+			CreatedAt:   user.CreatedAt.Format(time.RFC3339),
 		})
 	}
 
@@ -101,6 +104,49 @@ func (uc *UserUsecaseImpl) FindUser(ctx context.Context, userId string) (*entity
 		return nil, err
 	}
 	return user, nil
+}
+
+func (uc *UserUsecaseImpl) UpdateProfile(ctx context.Context, token string, request *req.EditProfileRequest) (res.UserResponse, error) {
+	userID, err := uc.JWT.GetUserIdFromToken(token)
+	if err != nil {
+		return res.UserResponse{}, errors.New("invalid token")
+	}
+
+	request.Name = strings.TrimSpace(request.Name)
+	request.PhoneNumber = strings.TrimSpace(request.PhoneNumber)
+	if err := uc.Validate.Struct(request); err != nil {
+		uc.Log.Http.Warning.Warn().Err(err).Str("userId", userID).Msg("Invalid profile update")
+		return res.UserResponse{}, ErrInvalidProfile
+	}
+
+	var taken int64
+	if err := uc.DB.WithContext(ctx).
+		Model(&entity.User{}).
+		Where("phone_number = ? AND id <> ?", request.PhoneNumber, userID).
+		Count(&taken).Error; err != nil {
+		return res.UserResponse{}, err
+	}
+	if taken > 0 {
+		return res.UserResponse{}, ErrPhoneTaken
+	}
+
+	result := uc.DB.WithContext(ctx).
+		Model(&entity.User{}).
+		Where("id = ?", userID).
+		Updates(map[string]interface{}{
+			"name":         request.Name,
+			"phone_number": request.PhoneNumber,
+		})
+	if result.Error != nil {
+		uc.Log.Http.Error.Error().Err(result.Error).Str("userId", userID).Msg("Failed to update profile")
+		return res.UserResponse{}, result.Error
+	}
+	if result.RowsAffected == 0 {
+		return res.UserResponse{}, ErrUserNotFound
+	}
+
+	uc.Log.Http.Info.Info().Str("userId", userID).Msg("Profile updated")
+	return getUserId(ctx, uc, userID)
 }
 
 func getUserId(ctx context.Context, uc *UserUsecaseImpl, userId string) (res.UserResponse, error) {
@@ -132,6 +178,6 @@ func getUserId(ctx context.Context, uc *UserUsecaseImpl, userId string) (res.Use
 		Name:        user.Name,
 		Email:       user.Email,
 		PhoneNumber: user.PhoneNumber,
-		CreatedAt:   user.CreatedAt.Format("2006-01-02 15:04:05"),
+		CreatedAt:   user.CreatedAt.Format(time.RFC3339),
 	}, nil
 }

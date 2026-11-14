@@ -67,9 +67,8 @@ func App(aC *AppConfig) {
 
 	newAuthHandler := handler.NewAuthHandler(newAuthUsecase, aC.AppLogger)
 	newUserHandler := handler.NewUserHandler(newUserUseCase, aC.AppLogger)
-	newChatHandler := handler.NewChatHandler(newChatUsecase, newMessageUsecase, aC.AppLogger, aC.JWT)
-
-	wsHandler := handler.NewWebSocketHandler(aC.GetDB(), aC.AppLogger, newChatUsecase, newMessageUsecase)
+	wsHandler := handler.NewWebSocketHandler(aC.AppLogger, aC.JWT, newChatUsecase, newMessageUsecase)
+	newChatHandler := handler.NewChatHandler(newChatUsecase, newMessageUsecase, wsHandler, aC.AppLogger, aC.JWT)
 
 	route := routes.ConfigRoute{
 		App:         aC.App,
