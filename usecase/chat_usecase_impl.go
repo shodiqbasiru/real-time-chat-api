@@ -56,33 +56,17 @@ func (uc *ChatUsecaseImpl) CreatePersonalChat(ctx context.Context, senderID, rec
 		return nil, err
 	}
 
-	chat, err := uc.ChatRepository.FindPersonalChat(ctx, uc.DB, senderID, receiverID)
+	chat, created, err := uc.ChatRepository.FindOrCreatePersonalChat(ctx, uc.DB, senderID, receiverID)
 	if err != nil {
 		uc.Log.Http.Error.Error().
 			Err(err).
 			Str("senderId", senderID).
 			Str("receiverId", receiverID).
-			Msg("Failed to check for existing personal chat")
+			Msg("Failed to find or create personal chat")
 		return nil, err
 	}
 
-	created := false
-	if chat == nil {
-		chat = &entity.Chat{ChatType: enum.PRIVATE}
-		participants := []entity.ChatParticipant{
-			{UserID: senderID},
-			{UserID: receiverID},
-		}
-		if err := uc.ChatRepository.CreateChatWithParticipants(ctx, uc.DB, chat, participants); err != nil {
-			uc.Log.Http.Error.Error().
-				Err(err).
-				Str("senderId", senderID).
-				Str("receiverId", receiverID).
-				Msg("Failed to create personal chat")
-			return nil, err
-		}
-		created = true
-	} else {
+	if !created {
 		uc.Log.Http.Info.Info().
 			Str("chatId", chat.ID).
 			Msg("Personal chat already exists, reusing it")

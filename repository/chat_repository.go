@@ -3,6 +3,9 @@ package repository
 import (
 	"context"
 	"errors"
+	"sort"
+	"strings"
+
 	"real-time-chat-app/entity"
 	"real-time-chat-app/enum"
 
@@ -37,6 +40,55 @@ func (repository ChatRepository) FindPersonalChat(ctx context.Context, db *gorm.
 	}
 
 	return &chat, nil
+}
+
+// FindOrCreatePersonalChat returns the private chat between two users and
+// creates it when they have none. created reports whether it was created.
+//
+// The lookup and the insert run in one transaction that holds a Postgres
+// advisory lock for this pair of users, so two simultaneous requests (both
+// users starting the chat at once, a double click, two tabs) wait for each
+// other instead of both creating a chat. Other pairs are not blocked.
+func (repository ChatRepository) FindOrCreatePersonalChat(ctx context.Context, db *gorm.DB, userAID, userBID string) (chat *entity.Chat, created bool, err error) {
+	err = db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Exec("SELECT pg_advisory_xact_lock(hashtextextended(?, 0))", personalChatLockKey(userAID, userBID)).Error; err != nil {
+			return err
+		}
+
+		existing, err := repository.FindPersonalChat(ctx, tx, userAID, userBID)
+		if err != nil {
+			return err
+		}
+		if existing != nil {
+			chat = existing
+			return nil
+		}
+
+		newChat := &entity.Chat{ChatType: enum.PRIVATE}
+		if err := tx.Create(newChat).Error; err != nil {
+			return err
+		}
+		participants := []entity.ChatParticipant{
+			{ChatID: newChat.ID, UserID: userAID},
+			{ChatID: newChat.ID, UserID: userBID},
+		}
+		if err := tx.Create(&participants).Error; err != nil {
+			return err
+		}
+		chat, created = newChat, true
+		return nil
+	})
+	if err != nil {
+		return nil, false, err
+	}
+	return chat, created, nil
+}
+
+// personalChatLockKey is the same for (a, b) and (b, a).
+func personalChatLockKey(userAID, userBID string) string {
+	ids := []string{userAID, userBID}
+	sort.Strings(ids)
+	return "private-chat:" + strings.Join(ids, ":")
 }
 
 func (repository ChatRepository) FindChatByID(ctx context.Context, db *gorm.DB, id string) (*entity.Chat, error) {
