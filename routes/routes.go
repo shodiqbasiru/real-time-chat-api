@@ -24,6 +24,10 @@ func (rc *ConfigRoute) GetPublicRoute() {
 	app := rc.App.Group("/api/v1")
 	app.Post("/auth/register", rc.AuthHandler.RegisterUser)
 	app.Post("/auth/login", rc.AuthHandler.LoginUser)
+	// refresh and logout work with the refresh token, so they must not
+	// require a (possibly expired) access token
+	app.Post("/auth/refresh", rc.AuthHandler.RefreshToken)
+	app.Post("/auth/logout", rc.AuthHandler.Logout)
 }
 
 func (rc *ConfigRoute) GetProtectedRoute() {

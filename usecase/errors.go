@@ -9,4 +9,6 @@ var (
 	ErrNotParticipant = errors.New("you are not a participant of this chat")
 	ErrInvalidProfile = errors.New("name must be 2-50 characters and phone number 8-20 characters")
 	ErrPhoneTaken     = errors.New("phone number is already used by another account")
+
+	ErrInvalidRefreshToken = errors.New("refresh token is invalid or expired")
 )

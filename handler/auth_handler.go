@@ -1,6 +1,8 @@
 package handler
 
 import (
+	"errors"
+
 	"real-time-chat-app/config/logger"
 	"real-time-chat-app/dto/req"
 	"real-time-chat-app/dto/res"
@@ -164,4 +166,54 @@ func (handler *AuthHandler) LoginUser(ctx *fiber.Ctx) error {
 		Msg("Response: Login successful")
 
 	return ctx.Status(fiber.StatusOK).JSON(response)
+}
+
+func (handler *AuthHandler) RefreshToken(ctx *fiber.Ctx) error {
+	payload := new(req.RefreshTokenRequest)
+	if err := ctx.BodyParser(payload); err != nil {
+		return ctx.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error": "Invalid request body",
+		})
+	}
+
+	session, err := handler.AuthUsecase.RefreshSession(ctx.Context(), payload)
+	if err != nil {
+		status := fiber.StatusInternalServerError
+		if errors.Is(err, usecase.ErrInvalidRefreshToken) {
+			status = fiber.StatusUnauthorized
+		}
+		handler.AppLogger.Http.Stream.Error().
+			Err(err).
+			Int("statusCode", status).
+			Msg("Response: Refresh failed")
+		return ctx.Status(status).JSON(fiber.Map{
+			"error": err.Error(),
+		})
+	}
+
+	return ctx.Status(fiber.StatusOK).JSON(res.CommonResponse[res.LoginResponse]{
+		Message:    "Successfully refreshed session",
+		StatusCode: fiber.StatusOK,
+		Data:       session,
+	})
+}
+
+func (handler *AuthHandler) Logout(ctx *fiber.Ctx) error {
+	payload := new(req.RefreshTokenRequest)
+	if err := ctx.BodyParser(payload); err != nil {
+		return ctx.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error": "Invalid request body",
+		})
+	}
+
+	if err := handler.AuthUsecase.Logout(ctx.Context(), payload); err != nil {
+		return ctx.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": err.Error(),
+		})
+	}
+
+	return ctx.Status(fiber.StatusOK).JSON(res.CommonResponse[any]{
+		Message:    "Successfully logged out",
+		StatusCode: fiber.StatusOK,
+	})
 }

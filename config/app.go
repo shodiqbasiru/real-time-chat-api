@@ -59,8 +59,9 @@ func App(aC *AppConfig) {
 	newAuthRepository := repository.NewAuthRepository()
 	newUserRepository := repository.NewUserRepository()
 	newChatRepository := repository.NewChatRepository()
+	newRefreshTokenRepository := repository.NewRefreshTokenRepository()
 
-	newAuthUsecase := usecase.NewAuthUsecase(newAuthRepository, aC.Validate, aC.GetDB(), aC.AppLogger, aC.JWT)
+	newAuthUsecase := usecase.NewAuthUsecase(newAuthRepository, newRefreshTokenRepository, aC.Validate, aC.GetDB(), aC.AppLogger, aC.JWT)
 	newUserUseCase := usecase.NewUserUsecase(newUserRepository, aC.Validate, aC.GetDB(), aC.AppLogger, aC.JWT)
 	newMessageUsecase := usecase.NewMessageUsecase(aC.DB, aC.AppLogger)
 	newChatUsecase := usecase.NewChatUsecase(newChatRepository, newMessageUsecase, newUserUseCase, aC.AppLogger, aC.GetDB(), aC.JWT)
